@@ -41,6 +41,7 @@ cg-mobile/
 │   ├── src/aes.js           # 纯 JS AES-128/192/256（ECB + PKCS#7）
 │   ├── src/cg-client.js     # TTL 缓存 / in-flight 合并 / 429 冷却 + 陈旧兜底
 │   ├── src/cg-data.js       # kline / orderFlow / OI / 深度墙 / 大单 / 清算位 / whalesPanel
+│   ├── src/wall-events.js   # 盘口大墙异动：原版 WallScanner 直译（加挂 / 撤单 / 被吃）
 │   ├── src/cvd.js           # Coinglass CVD 引擎（FlowGrid/recompute/背离/KPI）
 │   ├── src/fp.js            # 足迹聚合（fpFromBuckets / mergeFp）
 │   ├── src/signals.js       # 5 因子打分 / 足迹信号 / 入场-止损-TP / 结论
@@ -104,7 +105,7 @@ GitHub Actions (*/5 * * * *)            GitHub Pages
 | `GET /api/cvd?sym=ETH&itv=m15&limit=150` | CVD：4 家永续 + Binance 现货腿、累计/逐根 delta、买卖比、象限、背离 |
 | `GET /api/oi?sym=ETH` | 全场所 OI 聚合 + 1h/4h/24h 变化 |
 | `GET /api/market?sym=ETH` | 日内拍卖区（POC/VAH/VAL）、8h 拍卖、日 VWAP±σ、PDH/PDL |
-| `GET /api/walls?sym=ETH&snapshots=2` | Coinglass 多场所**聚合盘口**：±1%/±5% 买卖深度与失衡、阈值以上墙列表、近 ±1.2% 价位阶梯 |
+| `GET /api/walls?sym=ETH&snapshots=2[&events=0][&back=40][&elimit=12]` | Coinglass 多场所**聚合盘口**：±1%/±5% 买卖深度与失衡、当前挂墙、**大墙异动**（最新加挂/被吃/撤单，默认最近 12 条，往回扫 40 份 15m 快照 ≈ 10h）、近 ±1.2% 价位阶梯 |
 | `GET /api/whales?sym=ETH&min=100000` | 大额挂单（Binance/OKX/Bybit，`type=1` 永续 / `type=10` 现货，`side 1=卖 2=买`） |
 | `GET /api/liq?sym=ETH&limit=240` | 清算磁吸位（未触及清算档按价位聚簇，上方空头/下方多头） |
 
@@ -114,6 +115,22 @@ GitHub Actions (*/5 * * * *)            GitHub Pages
 `/api/health` 里带缓存条目数、字节数、各 host 的 429 冷却窗口。
 
 ---
+
+## 盘口墙 · 大墙异动（2026-11-17 接入原版）
+
+`worker/src/wall-events.js` 是 `cg-terminal/src/lib/cg/book-walls.ts` 里 `WallScanner` 的直译：
+
+- 解 Coinglass 聚合 stream 的每一行 `[ts, bids[[p,q]], asks[[p,q]]]` → 按 `meta.size` 分桶的快照；
+- 逐份快照扫 ±3%，阈值 `max(币种最小额, min(6 × median(±1% 墙), max(top4, 1.5 × median)))`；
+- 连续 2 次扫描都在才算「确认」→ 记一条 **加挂 `added`**（时间取首次出现）；
+- 墙消失时按「这段间隔里价格有没有碰到它」判定：碰到 = **被吃 `eaten`**，没碰到 = **撤单 `pulled`**；
+  「碰没碰到」用 m5 K 线高低覆盖「上一份快照 → 这一份」整个间隔（原版只用同周期那一根，这里更准），
+  金额取该墙存在期间的峰值；
+- 输出按时间倒序、只留最近 12 条（`eventLimit`），另带 `eventCounts`（加挂/被吃/撤单各多少）
+  与 `eventWindow`（扫了多久、多少份快照、阈值、格宽），JSON 不会因为 10 小时历史而膨胀。
+
+前端把 **盘口墙** 卡片挪到「5m/15m AI 概率」+「15m 足迹信号」正下方（K 线之前），
+卡片里自上而下是：±1% / ±5% 买卖深度与失衡 → 最近卖墙/买墙 → **大墙异动**（时间 / 加挂·被吃·撤单 / 买卖 / 价位 / 金额）→ 当前挂墙。
 
 ## 卡片算法（与终端模板一致）
 
@@ -157,8 +174,9 @@ GitHub Actions (*/5 * * * *)            GitHub Pages
   冷启动偏重时可能触发 1102，前端会**自动降级**为 `&liq=0&whales=0` 的轻量卡并提示，重活留给单独接口。
   想要稳定全量模式：Workers Paid（$5/月，30s CPU）或把刷新间隔调到 30s。
 - **Coinglass 限流**：命中 429 会按 `Retry-After` 冷却该 host 并回陈旧数据（≤180s），不会抖成白屏。
-- **盘口墙**：走聚合流最新 1–2 个快照（不含历史事件流），所以“加挂/撤单事件”没做；阈值
-  ETH $800k / BTC $1.5M / XAU $1M，±3% 内取最大 14 个。
+- **盘口墙**：`/api/brief` 与 `/api/walls` 会抓 40 份 15m 聚合快照（≈10h）扫「大墙异动」，
+  代价是每次多 ~1MB 上游 body / ~0.6s；阈值 ETH $800k / BTC $1.5M / XAU $1M，±3% 内取最大 14 个。
+  场所按币自动发现（Bitget 只对 BTC/ETH 有盘口，SOL/BNB/XRP… 会回 20001 并自动剔除），结果缓存 1h。
 - **鲸鱼挂单**：卡片里只取 Binance（省请求），`/api/whales` 面板取 3 家；永续/现货用 `type` 区分。
 - **清算位**：只用 Binance 一家的 `liquidationLevels/v2`（limit 240，3 天），不是 4 家合并。
 - **Hyperliquid**：足迹用逐根收盘价平移对齐 Binance，墙/清算不含 HL。

@@ -9,6 +9,7 @@ import { cgGet, cgStream, CAPI, FAPI } from "./cg-client.js";
 import { fpFromBuckets, mergeFp } from "./fp.js";
 import { FlowGrid, flowRows, recompute, detectDivergences, cvdKpis } from "./cvd.js";
 import { volumeProfile, utcDayStart } from "./signals.js";
+import { decodeBookRow, scanWallEvents } from "./wall-events.js";
 
 export const SYMBOLS = ["ETH", "BTC", "SOL", "BNB", "XRP", "ADA", "AVAX", "DOGE", "LINK", "LTC", "XAU", "XAG"];
 const METALS = new Set(["XAU", "XAG", "XPT"]);
@@ -248,39 +249,16 @@ export async function openInterest(sym, ttl = 30_000) {
 
 /* ------------------------------------------------------------------ walls */
 
-/** Decode one aggregate-stream row → { mid, bb, ba, buckets: [[price, usd]] } */
-function decodeAggRow(row, size) {
-  if (!Array.isArray(row) || !(size > 0)) return null;
-  const bids = Array.isArray(row[1]) ? row[1] : [];
-  const asks = Array.isArray(row[2]) ? row[2] : [];
-  let ba = Infinity;
-  for (const a of asks) {
-    const p = +a[0];
-    if (+a[1] > 0 && p < ba) ba = p;
-  }
-  let bb = -Infinity;
-  for (const b of bids) {
-    const p = +b[0];
-    if (+b[1] > 0 && p > bb && p < ba) bb = p;
-  }
-  if (!(bb > 0) && ba === Infinity) return null;
-  if (!(bb > 0)) bb = ba - size;
-  if (ba === Infinity) ba = bb + size;
-  const cells = [];
-  for (const b of bids) {
-    const p = +b[0];
-    const qy = +b[1];
-    if (!(qy > 0) || p > bb || p < bb * 0.85) continue;
-    cells.push([p, qy * p, "b"]);
-  }
-  for (const a of asks) {
-    const p = +a[0];
-    const qy = +a[1];
-    if (!(qy > 0) || p < ba || p > ba * 1.15) continue;
-    cells.push([p, qy * p, "a"]);
-  }
-  return { t: Number(row[0]) * 1000, mid: (bb + ba) / 2, bb, ba, size, cells };
-}
+/**
+ * 聚合盘口 stream（Coinglass /LiquidityHeatmap 的 aggregate 模式）。
+ *
+ * 每个币真正支持盘口的场所不同：只要请求里有一个场所没有该币的 heatmap 对，
+ * 整个 stream 就会报错（`No supported futures heatmap pair for SOL on Bitget`），
+ * 所以照原版做法把被点名的场所剔掉再试（SOL/BNB/XRP/ADA/AVAX/DOGE/LINK/LTC
+ * 都会踩这个坑），成功的场所组合缓存 1 小时。
+ */
+const venueCache = new Map(); // `${sym}|${market}` -> { at, venues }
+const VENUE_TTL = 3600_000;
 
 const WALL_MIN_USD = {
   BTC: 1_500_000,
@@ -301,61 +279,148 @@ export function minWallUsd(sym) {
   return WALL_MIN_USD[sym] ?? 150_000;
 }
 
-/**
- * ±band% depth + wall list from the Coinglass multi-venue aggregate book
- * stream (their LiquidityHeatmap aggregate mode). One or two snapshots only —
- * enough for depth/imbalance/walls without the heavy historical stream.
- */
-export async function bookWalls(sym, { band = 5, snapshots = 2, history = true } = {}) {
-  const exchanges = aggExchanges(sym);
-  const url =
-    `${CAPI}/liquidity-heatmap/api/liquidity/heatmap/aggregate/stream?` +
-    new URLSearchParams({
-      coin: sym,
-      exchanges: exchanges.join(","),
-      market: "futures",
-      interval: "m15",
-      limit: String(snapshots),
-      batchSize: "10",
-      endTime: String(Math.floor(Date.now() / 1000)),
-    }).toString();
+function rejectedVenue(msg) {
+  const m = /No supported \w+ heatmap pair for .+? on (.+?)\s*$/.exec(msg);
+  return m ? m[1] : null;
+}
 
-  const stream = await cgStream(url, 12_000);
-  const decoded = stream.rows.map((r) => decodeAggRow(r, stream.size)).filter(Boolean);
-  if (!decoded.length) throw new Error("walls: empty aggregate stream");
-  decoded.sort((a, b) => a.t - b.t);
-  const snap = decoded[decoded.length - 1];
+function aggStreamUrl(coin, venues, { market, interval, limit }) {
+  const qs = new URLSearchParams({
+    coin,
+    exchanges: venues.join(","),
+    market,
+    interval,
+    limit: String(limit),
+    batchSize: "10",
+    endTime: String(Math.floor(Date.now() / 1000)),
+  });
+  return `${CAPI}/liquidity-heatmap/api/liquidity/heatmap/aggregate/stream?${qs.toString()}`;
+}
+
+async function aggStream(sym, { market = "futures", interval = "m15", limit = 2, timeoutMs = 12_000 } = {}) {
+  const ck = `${sym}|${market}`;
+  const hit = venueCache.get(ck);
+  const cached = hit && Date.now() - hit.at < VENUE_TTL;
+  let venues = cached ? [...hit.venues] : aggExchanges(sym);
+  let lastErr = null;
+  for (let guard = 0; guard < 6 && venues.length; guard++) {
+    try {
+      const stream = await cgStream(aggStreamUrl(sym, venues, { market, interval, limit }), timeoutMs);
+      if (!cached || venues.join(",") !== hit.venues.join(",")) {
+        venueCache.set(ck, { at: Date.now(), venues: [...venues] });
+        if (venueCache.size > 64) venueCache.delete(venueCache.keys().next().value);
+      }
+      return { venues, stream };
+    } catch (e) {
+      lastErr = e;
+      const bad = rejectedVenue(e instanceof Error ? e.message : "");
+      if (!bad) throw e;
+      const next = venues.filter((v) => v !== bad);
+      if (next.length === venues.length) throw e;
+      venues = next;
+    }
+  }
+  throw lastErr ?? new Error(`walls: no heatmap venue for ${sym}`);
+}
+
+/** 一份快照 → [桶起点价, usd, side]，只留 ±band%（和原版 cells 一个意思） */
+function snapshotCells(snap, bandPct = 15) {
+  const out = [];
+  const g = snap.g;
   const mid = snap.mid;
+  for (let i = 0; i < snap.q.length; i++) {
+    const qty = snap.q[i];
+    if (!(qty > 0)) continue;
+    const p = (snap.k0 + i) * g;
+    const c = p + g / 2;
+    if (Math.abs(c / mid - 1) > bandPct / 100) continue;
+    out.push([p, qty * c, c < mid ? "b" : "a"]);
+  }
+  return out;
+}
+
+/**
+ * ±band% 深度 + 当前挂单墙 + 大墙异动，全部来自 Coinglass 的聚合盘口 stream
+ * （他们 /LiquidityHeatmap 页面的 aggregate 模式，多场所按价格对齐合并）。
+ *
+ *   snapshots       只算深度时需要的快照数（其实 1 份就够）
+ *   events          是否扫「大墙异动」（默认开）
+ *   eventSnapshots  为扫异动往回吃多少份 15m 快照（默认 40 ≈ 10 小时）
+ *   eventLimit      最近事件返回条数上限（默认 12，防止 JSON 膨胀）
+ */
+export async function bookWalls(
+  sym,
+  { band = 5, snapshots = 2, history = true, events = true, eventSnapshots = 40, eventLimit = 12 } = {}
+) {
+  const wantEvents = events !== false && events !== 0;
+  const back = wantEvents ? Math.min(Math.max(Number(eventSnapshots) || 40, 6), 96) : 1;
+  const want = Math.max(Number(snapshots) || 1, back);
+  const { venues, stream } = await aggStream(sym, {
+    interval: "m15",
+    limit: want,
+    timeoutMs: wantEvents ? 25_000 : 12_000,
+  });
+  const snaps = stream.rows
+    .map((r) => decodeBookRow(r, stream.size))
+    .filter(Boolean)
+    .sort((a, b) => a.t - b.t);
+  if (!snaps.length) throw new Error("walls: empty aggregate stream");
+  const snap = snaps[snaps.length - 1];
+  const mid = snap.mid;
+  const cells = snapshotCells(snap);
 
   const depth = (pct) => {
     const lo = mid * (1 - pct / 100);
     const hi = mid * (1 + pct / 100);
     let bidUsd = 0;
     let askUsd = 0;
-    for (const [p, usd, side] of snap.cells) {
-      if (p <= lo || p >= hi) continue;
+    for (const [p, usd, side] of cells) {
+      const c = p + snap.g / 2;
+      if (c <= lo || c >= hi) continue;
       if (side === "b") bidUsd += usd;
       else askUsd += usd;
     }
     return { bandPct: pct, bidUsd, askUsd, imb: bidUsd + askUsd > 0 ? (bidUsd - askUsd) / (bidUsd + askUsd) : 0 };
   };
 
-  // walls: one row per price bucket at/above the symbol's threshold, ±3%
-  const thresh = minWallUsd(sym);
-  const walls = [];
-  for (const [p, usd, side] of snap.cells) {
-    if (usd < thresh || Math.abs(p / mid - 1) > 0.03) continue;
-    walls.push({ side, price: p, usd: Math.round(usd), qty: null, distPct: +((p / mid - 1) * 100).toFixed(2) });
+  // 大墙异动：照原版 WallScanner 扫历史快照；「碰价」用 m5 K 线覆盖整个间隔
+  let scan = null;
+  if (wantEvents && snaps.length >= 2) {
+    const bars = await kline(sym, "m5", 300, 20_000).catch(() => []);
+    scan = scanWallEvents(snaps, {
+      minUsd: minWallUsd(sym),
+      candles: bars.map((b) => ({ ts: b.ts, h: b.h, l: b.l })),
+      candleStepMs: 300_000,
+      limit: eventLimit,
+    });
+  }
+
+  const dec = mid >= 100 ? 2 : mid >= 1 ? 3 : 5;
+  // 当前挂单墙：优先用扫描器确认过的墙（连续 2 次扫描都在），没有就退回单快照阈值表
+  let walls = (scan?.walls ?? []).map((w) => ({ ...w, price: +w.price.toFixed(dec) }));
+  if (!walls.length) {
+    const thresh = minWallUsd(sym);
+    for (const [p, usd, side] of cells) {
+      if (usd < thresh || Math.abs(p / mid - 1) > 0.03) continue;
+      walls.push({ side, price: p, usd: Math.round(usd), qty: null, distPct: +((p / mid - 1) * 100).toFixed(2) });
+    }
   }
   walls.sort((a, b) => b.usd - a.usd);
-  const top = walls.slice(0, 14);
 
-  // compact density strip (chart overlay): ±3% cells, USD per bucket
+  // 紧凑密度带（图表叠加用）：±3% 桶，只留最近 24 份快照
   const strip = [];
   if (history) {
-    for (const s of decoded) {
-      const cells = s.cells.filter(([p]) => Math.abs(p / s.mid - 1) <= 0.03).map(([p, usd]) => [p, Math.round(usd)]);
-      strip.push({ t: s.t, mid: s.mid, cells });
+    for (const s of snaps.slice(-24)) {
+      const rows = [];
+      for (let i = 0; i < s.q.length; i++) {
+        const qty = s.q[i];
+        if (!(qty > 0)) continue;
+        const p = (s.k0 + i) * s.g;
+        const c = p + s.g / 2;
+        if (Math.abs(c / s.mid - 1) > 0.03) continue;
+        rows.push([p, Math.round(qty * c)]);
+      }
+      strip.push({ t: s.t, mid: s.mid, cells: rows });
     }
   }
 
@@ -363,20 +428,24 @@ export async function bookWalls(sym, { band = 5, snapshots = 2, history = true }
     ok: true,
     sym,
     source: "coinglass-aggregate",
-    venues: exchanges,
+    venues,
     gridStep: stream.size,
     mid,
     depth1: depth(1),
     depth5: depth(band),
     imbalance: depth(1).imb,
-    walls: top,
+    walls: walls.slice(0, 14),
+    events: scan?.events ?? [],
+    eventCounts: scan?.counts ?? null,
+    eventTotal: scan?.total ?? 0,
+    eventWindow: scan?.window ?? null,
     strip,
-    ladder: snap.cells
+    ladder: cells
       .filter(([p]) => Math.abs(p / mid - 1) <= 0.012)
       .sort((a, b) => b[0] - a[0])
       .slice(0, 60)
       .map(([p, usd, side]) => ({ price: p, usd: Math.round(usd), side })),
-    snapshots: decoded.length,
+    snapshots: snaps.length,
     updatedAt: snap.t,
   };
 }

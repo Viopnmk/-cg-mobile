@@ -16,7 +16,7 @@
  *   GET /api/cvd?sym=ETH&itv=m15&limit=150
  *   GET /api/market?sym=ETH
  *   GET /api/oi?sym=ETH
- *   GET /api/walls?sym=ETH&band=5&snapshots=2
+ *   GET /api/walls?sym=ETH&band=5&snapshots=2[&events=0][&back=40][&elimit=12]
  *   GET /api/whales?sym=ETH&min=100000
  *   GET /api/liq?sym=ETH&limit=300
  */
@@ -202,7 +202,18 @@ export default {
         if (bad) return bad;
         const band = [1, 2, 3, 5].includes(Number(sp.get("band"))) ? Number(sp.get("band")) : 5;
         const snapshots = Math.min(Math.max(Number(sp.get("snapshots")) || 2, 1), 6);
-        const walls = await bookWalls(sym, { band, snapshots, history: sp.get("history") === "1" });
+        // events=0 关掉大墙异动；back= 往回吃多少份 15m 快照（默认 40 ≈ 10h）
+        const events = sp.get("events") !== "0";
+        const eventSnapshots = Math.min(Math.max(Number(sp.get("back")) || 40, 6), 96);
+        const eventLimit = Math.min(Math.max(Number(sp.get("elimit")) || 12, 1), 40);
+        const walls = await bookWalls(sym, {
+          band,
+          snapshots,
+          history: sp.get("history") === "1",
+          events,
+          eventSnapshots,
+          eventLimit,
+        });
         return json(walls);
       }
 

@@ -192,6 +192,14 @@ check("levels rendered", levels.includes("入场") && levels.includes("止损") 
 check("conclusion rendered", conclusion.includes("结论") && conclusion.length > 30, conclusion.replace(/<[^>]+>/g, "").slice(0, 90) + "…");
 check("footprint line", footprint.includes("足迹信号"), footprint.slice(0, 70) + "…");
 check("wall list", walls > 0, `${walls} rows`);
+const evs = getEl("evList").children.length;
+const evMeta = getEl("evMeta").textContent;
+check("大墙异动 rows", evs > 0 && evs <= 12, `${evs} rows · ${evMeta}`);
+check(
+  "大墙异动 row shape",
+  /^\d{2}:\d{2}$/.test(getEl("evList").children[0]?.innerHTML.slice(8, 13)) || /加挂|被吃|撤单/.test(getEl("evList").children[0]?.innerHTML ?? ""),
+  (getEl("evList").children[0]?.innerHTML ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 60)
+);
 check("whale list", whales > 0, `${whales} rows`);
 check("whale 1h stats", /笔/.test(getEl("w1n").textContent), getEl("w1n").textContent);
 check("depth ±1%", getEl("d1bid").textContent !== "—", `${getEl("d1bid").textContent} / ${getEl("d1ask").textContent}`);

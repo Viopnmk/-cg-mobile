@@ -191,6 +191,25 @@
   .nearest .v{font-size:14px; font-weight:800; margin-top:2px;}
   .nearest .s{font-size:10.5px; color:var(--dim2); margin-top:1px;}
 
+  /* wall events (大墙异动) */
+  .sub{display:flex; align-items:center; gap:8px; margin:14px 0 7px;}
+  .sub h3{font-size:12px; color:#c8d0de; font-weight:800;}
+  .sub .mini{margin-left:auto;}
+  .evlist{display:grid; gap:5px;}
+  .ev{display:grid; grid-template-columns:36px 1fr auto; gap:8px; align-items:center; font-size:12px;
+      padding:6px 9px; border-radius:9px; background:var(--card2); border:1px solid var(--line);}
+  .ev .tm{font-size:10.5px; color:var(--dim2);}
+  .ev .t2{font-size:10px; font-weight:800; padding:1px 6px; border-radius:6px; margin-right:6px;}
+  .ev .t2.ann {color:#8ec5ff; background:rgba(96,165,250,.15);}
+  .ev .t2.eat {color:#ffb27a; background:rgba(255,140,60,.16);}
+  .ev .t2.pul {color:#c3cbd9; background:rgba(150,160,180,.18);}
+  .ev .sd2{font-weight:800; font-size:11px; margin-right:4px;}
+  .ev .sd2.b{color:var(--up);} .ev .sd2.a{color:var(--down);}
+  .ev .px{font-weight:700;}
+  .ev .d{font-size:10.5px; color:var(--dim2); margin-left:6px;}
+  .ev .usd{font-weight:800;}
+  .ev .usd.b{color:var(--up);} .ev .usd.a{color:var(--down);}
+
   /* whales */
   .wstats{display:grid; grid-template-columns:repeat(3,1fr); gap:8px;}
   .wstat{background:var(--card2); border:1px solid var(--line); border-radius:11px; padding:8px 9px;}
@@ -316,6 +335,29 @@
       <div class="siglist" id="sigList"></div>
     </section>
 
+    <!-- book walls + 大墙异动 -->
+    <section class="card">
+      <div class="hd"><h2>盘口墙 · 大墙异动</h2><span class="tag">±1% / ±5%</span><span class="spacer"></span><span class="mini" id="wallMeta">—</span></div>
+      <div class="imb">
+        <div class="l"><span>±1% 买 <b class="num" id="d1bid">—</b></span><span>卖 <b class="num" id="d1ask">—</b></span></div>
+        <div class="track"><i id="d1bar" style="width:50%"></i></div>
+        <div class="note" id="d1note">—</div>
+      </div>
+      <div class="imb">
+        <div class="l"><span>±5% 买 <b class="num" id="d5bid">—</b></span><span>卖 <b class="num" id="d5ask">—</b></span></div>
+        <div class="track"><i id="d5bar" style="width:50%"></i></div>
+        <div class="note" id="d5note">—</div>
+      </div>
+      <div class="nearest">
+        <div><div class="k">最近卖墙（阻力）</div><div class="v num" id="nAsk">—</div><div class="s" id="nAsk2">—</div></div>
+        <div><div class="k">最近买墙（支撑）</div><div class="v num" id="nBid">—</div><div class="s" id="nBid2">—</div></div>
+      </div>
+      <div class="sub"><h3>大墙异动</h3><span class="mini" id="evMeta">—</span></div>
+      <div class="evlist" id="evList"></div>
+      <div class="sub"><h3>当前挂墙</h3><span class="mini" id="wallListMeta">—</span></div>
+      <div class="walls" id="wallList"></div>
+    </section>
+
     <!-- chart -->
     <section class="card">
       <div class="hd">
@@ -335,25 +377,6 @@
       </div>
     </section>
 
-    <!-- orderflow / walls -->
-    <section class="card">
-      <div class="hd"><h2>大订单流 & 盘口墙</h2><span class="spacer"></span><span class="mini" id="wallMeta">—</span></div>
-      <div class="imb">
-        <div class="l"><span>±1% 买 <b class="num" id="d1bid">—</b></span><span>卖 <b class="num" id="d1ask">—</b></span></div>
-        <div class="track"><i id="d1bar" style="width:50%"></i></div>
-        <div class="note" id="d1note">—</div>
-      </div>
-      <div class="imb">
-        <div class="l"><span>±5% 买 <b class="num" id="d5bid">—</b></span><span>卖 <b class="num" id="d5ask">—</b></span></div>
-        <div class="track"><i id="d5bar" style="width:50%"></i></div>
-        <div class="note" id="d5note">—</div>
-      </div>
-      <div class="nearest">
-        <div><div class="k">最近卖墙（阻力）</div><div class="v num" id="nAsk">—</div><div class="s" id="nAsk2">—</div></div>
-        <div><div class="k">最近买墙（支撑）</div><div class="v num" id="nBid">—</div><div class="s" id="nBid2">—</div></div>
-      </div>
-      <div class="walls" id="wallList"></div>
-    </section>
 
     <!-- whales -->
     <section class="card">
@@ -428,7 +451,7 @@
     d1bid: $("d1bid"), d1ask: $("d1ask"), d1bar: $("d1bar"), d1note: $("d1note"),
     d5bid: $("d5bid"), d5ask: $("d5ask"), d5bar: $("d5bar"), d5note: $("d5note"),
     nAsk: $("nAsk"), nAsk2: $("nAsk2"), nBid: $("nBid"), nBid2: $("nBid2"),
-    wallList: $("wallList"), whaleMeta: $("whaleMeta"),
+    wallList: $("wallList"), evList: $("evList"), evMeta: $("evMeta"), wallListMeta: $("wallListMeta"), whaleMeta: $("whaleMeta"),
     w1n: $("w1n"), w1bs: $("w1bs"), w1net: $("w1net"), wtabs: $("wtabs"), wlist: $("wlist"),
     foot: $("foot"), cfgBtn: $("cfgBtn"), srcBadge: $("srcBadge"), srcTag: $("srcTag"),
   };
@@ -515,7 +538,7 @@
     el.probVal.textContent = "—"; el.aiStatus.textContent = "加载中…"; el.aiSub.textContent = "—";
     el.factors.innerHTML = ""; el.levels.innerHTML = "";
     el.conclusion.textContent = "—"; el.fpLine.textContent = "—"; el.sigList.innerHTML = "";
-    el.wallList.innerHTML = ""; el.wlist.innerHTML = "";
+    el.wallList.innerHTML = ""; el.evList.innerHTML = ""; el.evMeta.textContent = "—"; el.wlist.innerHTML = "";
   }
 
   async function api(path, timeoutMs = 20000) {
@@ -760,6 +783,10 @@
     const w = b.walls;
     if (!w) {
       el.wallMeta.textContent = "无数据";
+      el.evMeta.textContent = "无数据";
+      el.evList.innerHTML = '<div class="empty">这个标的这次没拿到盘口 stream，稍后自动重试。</div>';
+      el.wallListMeta.textContent = "";
+      el.wallList.innerHTML = "";
       return;
     }
     el.wallMeta.textContent = (w.venues || []).length + " 场所 · 格 " + w.gridStep;
@@ -780,7 +807,10 @@
     el.nBid.textContent = w.nearestBid ? fmtPx(w.nearestBid.price, b.price) : "—";
     el.nBid2.textContent = w.nearestBid ? usd(w.nearestBid.usd) + " · 下方 " + w.nearestBid.distPct?.toFixed(2) + "%" : "—";
 
+    renderWallEvents(b);
+
     el.wallList.innerHTML = "";
+    el.wallListMeta.textContent = (w.walls || []).length + " 面 ≥ " + usd(w.eventWindow?.minUsd ?? 0);
     for (const x of (w.walls || []).slice(0, 8)) {
       const d = document.createElement("div");
       d.className = "wall";
@@ -789,6 +819,40 @@
         '<div><span class="px">' + fmtPx(x.price, b.price) + '</span><span class="d">' + (x.distPct > 0 ? "+" : "") + x.distPct + "%</span></div>" +
         '<div class="usd">' + usd(x.usd) + "</div>";
       el.wallList.appendChild(d);
+    }
+  }
+
+  /** 大墙异动：最新加挂 / 被吃 / 撤单（原版 WallScanner 的事件流，最近 12 条） */
+  function renderWallEvents(b) {
+    const w = b.walls || {};
+    const list = w.events || [];
+    const c = w.eventCounts || {};
+    const win = w.eventWindow || null;
+    const hrs = win ? Math.max(1, Math.round((win.to - win.from) / 3600_000)) : null;
+    if (!list.length) {
+      el.evMeta.textContent = hrs ? "近 " + hrs + "h" : "—";
+      el.evList.innerHTML =
+        '<div class="empty">近 ' + (hrs || "几") + " 小时没有超过阈值（" +
+        usd(win?.minUsd ?? 0) + "）的大墙异动。</div>";
+      return;
+    }
+    el.evMeta.textContent =
+      (hrs ? "近 " + hrs + "h · " : "") + "共 " + (w.eventTotal ?? list.length) + " 条 · 加挂 " +
+      (c.added ?? 0) + " / 被吃 " + (c.eaten ?? 0) + " / 撤单 " + (c.pulled ?? 0);
+    const NAME = { added: "加挂", eaten: "被吃", pulled: "撤单" };
+    const CLS = { added: "ann", eaten: "eat", pulled: "pul" };
+    el.evList.innerHTML = "";
+    for (const e of list.slice(0, 12)) {
+      const d = document.createElement("div");
+      d.className = "ev";
+      d.innerHTML =
+        '<div class="tm">' + hhmm(e.t) + "</div>" +
+        '<div><span class="t2 ' + (CLS[e.type] || "pul") + '">' + (NAME[e.type] || e.type) + "</span>" +
+        '<span class="sd2 ' + (e.side === "b" ? "b" : "a") + '">' + (e.side === "b" ? "买" : "卖") + "</span>" +
+        '<span class="px">' + fmtPx(e.price, b.price) + "</span>" +
+        '<span class="d">' + (e.distPct > 0 ? "+" : "") + e.distPct + "%</span></div>" +
+        '<div class="usd ' + (e.side === "b" ? "b" : "a") + '">' + usd(e.usd) + "</div>";
+      el.evList.appendChild(d);
     }
   }
 

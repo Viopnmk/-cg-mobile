@@ -1698,6 +1698,236 @@ var utcDayStart = (ms) => {
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
 };
 
+// src/wall-events.js
+function decodeBookRow(row, size) {
+  if (!Array.isArray(row) || !(size > 0)) return null;
+  const bids = Array.isArray(row[1]) ? row[1] : [];
+  const asks = Array.isArray(row[2]) ? row[2] : [];
+  let ba = Infinity;
+  for (const a of asks) {
+    const p = +a[0];
+    if (+a[1] > 0 && p < ba) ba = p;
+  }
+  let bb = -Infinity;
+  for (const b of bids) {
+    const p = +b[0];
+    if (+b[1] > 0 && p > bb && p < ba) bb = p;
+  }
+  if (!(bb > 0) && ba === Infinity) return null;
+  if (!(bb > 0)) bb = ba - size;
+  if (ba === Infinity) ba = bb + size;
+  let kMin = Infinity;
+  let kMax = -Infinity;
+  const flat = [];
+  for (const b of bids) {
+    const p = +b[0];
+    const q3 = +b[1];
+    if (!(q3 > 0) || p > bb) continue;
+    const k = Math.round(p / size);
+    flat.push(k, q3);
+    if (k < kMin) kMin = k;
+    if (k > kMax) kMax = k;
+  }
+  for (const a of asks) {
+    const p = +a[0];
+    const q3 = +a[1];
+    if (!(q3 > 0) || p < ba) continue;
+    const k = Math.round(p / size);
+    flat.push(k, q3);
+    if (k < kMin) kMin = k;
+    if (k > kMax) kMax = k;
+  }
+  if (!flat.length) return null;
+  const q2 = new Float64Array(kMax - kMin + 1);
+  for (let i = 0; i < flat.length; i += 2) q2[flat[i] - kMin] += flat[i + 1];
+  return { t: 1e3 * Number(row[0]), g: size, k0: kMin, q: q2, bb, ba, mid: (bb + ba) / 2 };
+}
+function rebinInto(s, grid, n, count, out) {
+  out.fill(0, 0, count);
+  if (!s || !s.q) return;
+  const sGrid = s.g;
+  if (sGrid <= 1.0000001 * grid) {
+    const h = grid / sGrid;
+    const lo = Math.max(s.k0, Math.floor(n * h + 1e-9));
+    const hi = Math.min(s.k0 + s.q.length - 1, Math.ceil((n + count) * h) - 1);
+    for (let k = lo; k <= hi; k++) {
+      const v = s.q[k - s.k0];
+      if (v > 0) {
+        const idx = Math.floor(k / h + 1e-9) - n;
+        if (idx >= 0 && idx < count) out[idx] += v;
+      }
+    }
+  } else {
+    const h = grid / sGrid;
+    for (let i = 0; i < count; i++) {
+      const src = Math.floor((n + i) * h + 1e-9);
+      const idx = src - s.k0;
+      if (idx >= 0 && idx < s.q.length) out[i] += s.q[idx] * h;
+    }
+  }
+}
+var SCRATCH = new Float64Array(3e4);
+var WallScanner = class {
+  constructor() {
+    this.st = /* @__PURE__ */ new Map();
+    this.events = [];
+  }
+  current() {
+    return [...this.st.values()].filter((w) => w.shown).sort((a, b) => b.usd - a.usd);
+  }
+  scan(s, isLive, grid, minUsd, range) {
+    if (!(grid > 0) || !s) return;
+    const r = s.mid;
+    const n = Math.floor(0.97 * r / grid);
+    const count = Math.ceil(1.03 * r / grid) - n + 1;
+    if (count > SCRATCH.length || count < 3) return;
+    rebinInto(s, grid, n, count, SCRATCH);
+    const near = [];
+    const top4 = [0, 0, 0, 0];
+    for (let i = 0; i < count; i++) {
+      const qty = SCRATCH[i];
+      if (!(qty > 0)) continue;
+      const price = (n + i + 0.5) * grid;
+      const usd = qty * price;
+      if (Math.abs(price / r - 1) <= 0.01) near.push(usd);
+      if (usd > top4[3]) {
+        let e = 3;
+        while (e > 0 && usd > top4[e - 1]) {
+          top4[e] = top4[e - 1];
+          e--;
+        }
+        top4[e] = usd;
+      }
+    }
+    near.sort((a, b) => a - b);
+    const median = near.length ? near[near.length >> 1] : Infinity;
+    const c = Math.max(2.5, 6 / Math.sqrt(grid / grid));
+    const thr = Math.max(minUsd, Math.min(median * c, Math.max(top4[3], 1.5 * median)));
+    const confirm = isLive ? 3 : 2;
+    const seen = /* @__PURE__ */ new Set();
+    const [loP, hiP] = range;
+    const touched = (w) => w.side === "b" ? loP < w.p + w.G : hiP >= w.p;
+    for (let i = 0; i < count; i++) {
+      const qty = SCRATCH[i];
+      if (!qty) continue;
+      const p = (n + i) * grid;
+      const mid = p + grid / 2;
+      const usd = qty * mid;
+      const side = mid < r ? "b" : "a";
+      const key = side + (n + i);
+      seen.add(key);
+      let w = this.st.get(key);
+      if (!(usd >= thr) && !(w && usd >= 0.6 * thr)) continue;
+      if (!w) {
+        w = { key, side, k: n + i, p, G: grid, first: s.t, last: s.t, cf: 0, miss: 0, peak: 0, usd: 0, qty: 0, shown: false, touch: false };
+        this.st.set(key, w);
+      }
+      w.last = s.t;
+      w.cf++;
+      w.miss = 0;
+      w.usd = usd;
+      w.qty = qty;
+      if (usd > w.peak) w.peak = usd;
+      w.touch = touched(w);
+      if (!w.shown && w.cf >= confirm) {
+        w.shown = true;
+        this.pushEvent({ t: w.first, type: "add", side, p, usd, qty, mid: s.mid });
+      }
+    }
+    for (const [key, w] of this.st) {
+      if (seen.has(key)) continue;
+      if (w.p < 0.97 * r || w.p > 1.03 * r) {
+        this.st.delete(key);
+        continue;
+      }
+      if (touched(w)) w.touch = true;
+      if (++w.miss >= confirm) {
+        this.st.delete(key);
+        if (w.shown) {
+          this.pushEvent({
+            t: s.t,
+            type: w.touch ? "fill" : "pull",
+            side: w.side,
+            p: w.p,
+            usd: w.peak,
+            qty: w.qty,
+            mid: s.mid
+          });
+        }
+      }
+    }
+  }
+  pushEvent(e) {
+    this.events.push(e);
+    if (this.events.length > 600) this.events.splice(0, this.events.length - 400);
+  }
+};
+var KIND = { add: "added", fill: "eaten", pull: "pulled" };
+function rangesFromCandles(sorted, candles, candleStepMs) {
+  const bars = [...candles].filter((c) => Number.isFinite(c.h) && Number.isFinite(c.l)).sort((a, b) => a.ts - b.ts);
+  const out = [];
+  let j = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    const s = sorted[i];
+    const from = i ? sorted[i - 1].t : s.t;
+    if (!bars.length || !(candleStepMs > 0) || from === s.t) {
+      out.push([s.bb, s.ba]);
+      continue;
+    }
+    while (j < bars.length && bars[j].ts < from) j++;
+    let lo = s.bb;
+    let hi = s.ba;
+    for (let k = j; k < bars.length && bars[k].ts <= s.t - candleStepMs; k++) {
+      if (bars[k].l < lo) lo = bars[k].l;
+      if (bars[k].h > hi) hi = bars[k].h;
+    }
+    out.push([lo, hi]);
+  }
+  return out;
+}
+function scanWallEvents(snaps, { minUsd, candles = [], candleStepMs = 0, stepMs = 9e5, limit = 12, grid } = {}) {
+  const sorted = [...snaps].filter(Boolean).sort((a, b) => a.t - b.t);
+  if (!sorted.length) return { events: [], window: null, grid: null };
+  const g = grid && grid > 0 ? grid : sorted[sorted.length - 1].g;
+  const ranges = candleStepMs > 0 ? rangesFromCandles(sorted, candles, candleStepMs) : null;
+  const scanner = new WallScanner();
+  for (let i = 0; i < sorted.length; i++) {
+    const s = sorted[i];
+    scanner.scan(s, false, g, minUsd, ranges ? ranges[i] : [s.bb, s.ba]);
+  }
+  const last2 = sorted[sorted.length - 1];
+  const dec2 = last2.mid >= 1e3 ? 2 : last2.mid >= 100 ? 2 : last2.mid >= 1 ? 3 : 5;
+  const rows = scanner.events.map((e) => ({
+    t: e.t,
+    type: KIND[e.type] ?? e.type,
+    side: e.side,
+    price: +(e.p + g / 2).toFixed(dec2),
+    usd: Math.round(e.usd),
+    qty: +e.qty.toFixed(4),
+    mid: +(e.mid ?? last2.mid).toFixed(dec2 + 1),
+    distPct: +(((e.p + g / 2) / (e.mid ?? last2.mid) - 1) * 100).toFixed(2)
+  })).sort((a, b) => b.t - a.t);
+  const counts = { added: 0, pulled: 0, eaten: 0 };
+  for (const r of rows) counts[r.type] = (counts[r.type] ?? 0) + 1;
+  const walls = scanner.current().map((w) => ({
+    side: w.side,
+    price: w.p + g / 2,
+    usd: Math.round(w.usd),
+    qty: +w.qty.toFixed(4),
+    distPct: +(((w.p + g / 2) / last2.mid - 1) * 100).toFixed(2),
+    firstSeen: w.first,
+    ageMs: last2.t - w.first,
+    touched: !!w.touch
+  })).sort((a, b) => b.usd - a.usd);
+  return {
+    events: rows.slice(0, Math.max(1, Math.min(limit, 40))),
+    counts,
+    total: rows.length,
+    walls,
+    window: { from: sorted[0].t, to: last2.t, snapshots: sorted.length, minUsd: Math.round(minUsd), grid: g }
+  };
+}
+
 // src/cg-data.js
 var SYMBOLS = ["ETH", "BTC", "SOL", "BNB", "XRP", "ADA", "AVAX", "DOGE", "LINK", "LTC", "XAU", "XAG"];
 var METALS = /* @__PURE__ */ new Set(["XAU", "XAG", "XPT"]);
@@ -1900,38 +2130,8 @@ async function openInterest(sym, ttl = 3e4) {
     updatedAt: Date.now()
   };
 }
-function decodeAggRow(row, size) {
-  if (!Array.isArray(row) || !(size > 0)) return null;
-  const bids = Array.isArray(row[1]) ? row[1] : [];
-  const asks = Array.isArray(row[2]) ? row[2] : [];
-  let ba = Infinity;
-  for (const a of asks) {
-    const p = +a[0];
-    if (+a[1] > 0 && p < ba) ba = p;
-  }
-  let bb = -Infinity;
-  for (const b of bids) {
-    const p = +b[0];
-    if (+b[1] > 0 && p > bb && p < ba) bb = p;
-  }
-  if (!(bb > 0) && ba === Infinity) return null;
-  if (!(bb > 0)) bb = ba - size;
-  if (ba === Infinity) ba = bb + size;
-  const cells = [];
-  for (const b of bids) {
-    const p = +b[0];
-    const qy = +b[1];
-    if (!(qy > 0) || p > bb || p < bb * 0.85) continue;
-    cells.push([p, qy * p, "b"]);
-  }
-  for (const a of asks) {
-    const p = +a[0];
-    const qy = +a[1];
-    if (!(qy > 0) || p < ba || p > ba * 1.15) continue;
-    cells.push([p, qy * p, "a"]);
-  }
-  return { t: Number(row[0]) * 1e3, mid: (bb + ba) / 2, bb, ba, size, cells };
-}
+var venueCache = /* @__PURE__ */ new Map();
+var VENUE_TTL = 36e5;
 var WALL_MIN_USD = {
   BTC: 15e5,
   ETH: 8e5,
@@ -1949,64 +2149,141 @@ var WALL_MIN_USD = {
 function minWallUsd(sym) {
   return WALL_MIN_USD[sym] ?? 15e4;
 }
-async function bookWalls(sym, { band = 5, snapshots = 2, history = true } = {}) {
-  const exchanges = aggExchanges(sym);
-  const url = `${CAPI}/liquidity-heatmap/api/liquidity/heatmap/aggregate/stream?` + new URLSearchParams({
-    coin: sym,
-    exchanges: exchanges.join(","),
-    market: "futures",
-    interval: "m15",
-    limit: String(snapshots),
+function rejectedVenue(msg) {
+  const m = /No supported \w+ heatmap pair for .+? on (.+?)\s*$/.exec(msg);
+  return m ? m[1] : null;
+}
+function aggStreamUrl(coin, venues, { market, interval, limit }) {
+  const qs = new URLSearchParams({
+    coin,
+    exchanges: venues.join(","),
+    market,
+    interval,
+    limit: String(limit),
     batchSize: "10",
     endTime: String(Math.floor(Date.now() / 1e3))
-  }).toString();
-  const stream = await cgStream(url, 12e3);
-  const decoded = stream.rows.map((r) => decodeAggRow(r, stream.size)).filter(Boolean);
-  if (!decoded.length) throw new Error("walls: empty aggregate stream");
-  decoded.sort((a, b) => a.t - b.t);
-  const snap = decoded[decoded.length - 1];
+  });
+  return `${CAPI}/liquidity-heatmap/api/liquidity/heatmap/aggregate/stream?${qs.toString()}`;
+}
+async function aggStream(sym, { market = "futures", interval = "m15", limit = 2, timeoutMs = 12e3 } = {}) {
+  const ck = `${sym}|${market}`;
+  const hit = venueCache.get(ck);
+  const cached = hit && Date.now() - hit.at < VENUE_TTL;
+  let venues = cached ? [...hit.venues] : aggExchanges(sym);
+  let lastErr = null;
+  for (let guard = 0; guard < 6 && venues.length; guard++) {
+    try {
+      const stream = await cgStream(aggStreamUrl(sym, venues, { market, interval, limit }), timeoutMs);
+      if (!cached || venues.join(",") !== hit.venues.join(",")) {
+        venueCache.set(ck, { at: Date.now(), venues: [...venues] });
+        if (venueCache.size > 64) venueCache.delete(venueCache.keys().next().value);
+      }
+      return { venues, stream };
+    } catch (e) {
+      lastErr = e;
+      const bad = rejectedVenue(e instanceof Error ? e.message : "");
+      if (!bad) throw e;
+      const next = venues.filter((v) => v !== bad);
+      if (next.length === venues.length) throw e;
+      venues = next;
+    }
+  }
+  throw lastErr ?? new Error(`walls: no heatmap venue for ${sym}`);
+}
+function snapshotCells(snap, bandPct = 15) {
+  const out = [];
+  const g = snap.g;
   const mid = snap.mid;
+  for (let i = 0; i < snap.q.length; i++) {
+    const qty = snap.q[i];
+    if (!(qty > 0)) continue;
+    const p = (snap.k0 + i) * g;
+    const c = p + g / 2;
+    if (Math.abs(c / mid - 1) > bandPct / 100) continue;
+    out.push([p, qty * c, c < mid ? "b" : "a"]);
+  }
+  return out;
+}
+async function bookWalls(sym, { band = 5, snapshots = 2, history = true, events = true, eventSnapshots = 40, eventLimit = 12 } = {}) {
+  const wantEvents = events !== false && events !== 0;
+  const back = wantEvents ? Math.min(Math.max(Number(eventSnapshots) || 40, 6), 96) : 1;
+  const want = Math.max(Number(snapshots) || 1, back);
+  const { venues, stream } = await aggStream(sym, {
+    interval: "m15",
+    limit: want,
+    timeoutMs: wantEvents ? 25e3 : 12e3
+  });
+  const snaps = stream.rows.map((r) => decodeBookRow(r, stream.size)).filter(Boolean).sort((a, b) => a.t - b.t);
+  if (!snaps.length) throw new Error("walls: empty aggregate stream");
+  const snap = snaps[snaps.length - 1];
+  const mid = snap.mid;
+  const cells = snapshotCells(snap);
   const depth = (pct) => {
     const lo = mid * (1 - pct / 100);
     const hi = mid * (1 + pct / 100);
     let bidUsd = 0;
     let askUsd = 0;
-    for (const [p, usd, side] of snap.cells) {
-      if (p <= lo || p >= hi) continue;
+    for (const [p, usd, side] of cells) {
+      const c = p + snap.g / 2;
+      if (c <= lo || c >= hi) continue;
       if (side === "b") bidUsd += usd;
       else askUsd += usd;
     }
     return { bandPct: pct, bidUsd, askUsd, imb: bidUsd + askUsd > 0 ? (bidUsd - askUsd) / (bidUsd + askUsd) : 0 };
   };
-  const thresh = minWallUsd(sym);
-  const walls = [];
-  for (const [p, usd, side] of snap.cells) {
-    if (usd < thresh || Math.abs(p / mid - 1) > 0.03) continue;
-    walls.push({ side, price: p, usd: Math.round(usd), qty: null, distPct: +((p / mid - 1) * 100).toFixed(2) });
+  let scan = null;
+  if (wantEvents && snaps.length >= 2) {
+    const bars = await kline(sym, "m5", 300, 2e4).catch(() => []);
+    scan = scanWallEvents(snaps, {
+      minUsd: minWallUsd(sym),
+      candles: bars.map((b) => ({ ts: b.ts, h: b.h, l: b.l })),
+      candleStepMs: 3e5,
+      limit: eventLimit
+    });
+  }
+  const dec2 = mid >= 100 ? 2 : mid >= 1 ? 3 : 5;
+  let walls = (scan?.walls ?? []).map((w) => ({ ...w, price: +w.price.toFixed(dec2) }));
+  if (!walls.length) {
+    const thresh = minWallUsd(sym);
+    for (const [p, usd, side] of cells) {
+      if (usd < thresh || Math.abs(p / mid - 1) > 0.03) continue;
+      walls.push({ side, price: p, usd: Math.round(usd), qty: null, distPct: +((p / mid - 1) * 100).toFixed(2) });
+    }
   }
   walls.sort((a, b) => b.usd - a.usd);
-  const top = walls.slice(0, 14);
   const strip = [];
   if (history) {
-    for (const s of decoded) {
-      const cells = s.cells.filter(([p]) => Math.abs(p / s.mid - 1) <= 0.03).map(([p, usd]) => [p, Math.round(usd)]);
-      strip.push({ t: s.t, mid: s.mid, cells });
+    for (const s of snaps.slice(-24)) {
+      const rows = [];
+      for (let i = 0; i < s.q.length; i++) {
+        const qty = s.q[i];
+        if (!(qty > 0)) continue;
+        const p = (s.k0 + i) * s.g;
+        const c = p + s.g / 2;
+        if (Math.abs(c / s.mid - 1) > 0.03) continue;
+        rows.push([p, Math.round(qty * c)]);
+      }
+      strip.push({ t: s.t, mid: s.mid, cells: rows });
     }
   }
   return {
     ok: true,
     sym,
     source: "coinglass-aggregate",
-    venues: exchanges,
+    venues,
     gridStep: stream.size,
     mid,
     depth1: depth(1),
     depth5: depth(band),
     imbalance: depth(1).imb,
-    walls: top,
+    walls: walls.slice(0, 14),
+    events: scan?.events ?? [],
+    eventCounts: scan?.counts ?? null,
+    eventTotal: scan?.total ?? 0,
+    eventWindow: scan?.window ?? null,
     strip,
-    ladder: snap.cells.filter(([p]) => Math.abs(p / mid - 1) <= 0.012).sort((a, b) => b[0] - a[0]).slice(0, 60).map(([p, usd, side]) => ({ price: p, usd: Math.round(usd), side })),
-    snapshots: decoded.length,
+    ladder: cells.filter(([p]) => Math.abs(p / mid - 1) <= 0.012).sort((a, b) => b[0] - a[0]).slice(0, 60).map(([p, usd, side]) => ({ price: p, usd: Math.round(usd), side })),
+    snapshots: snaps.length,
     updatedAt: snap.t
   };
 }
@@ -2160,7 +2437,7 @@ async function buildBrief(sym, opts = {}) {
     settle("footprint", footprint(sym, "m15", fpLim)),
     settle("cvd", cvd(sym, "m15", 150)),
     settle("oi", openInterest(sym)),
-    settle("walls", bookWalls(sym, { band: 5, snapshots: 1, history: false })),
+    settle("walls", bookWalls(sym, { band: 5, snapshots: 1, history: false, events: true, eventSnapshots: 40, eventLimit: 12 })),
     withLiq ? settle("liq", liqLevels(sym, { limit: 240, range: "3d", px: 0 })) : Promise.resolve(null),
     withWhales ? settle("whales", largeOrders(sym, { exchanges: ["Binance"] })) : Promise.resolve(null)
   ]);
@@ -2180,7 +2457,10 @@ async function buildBrief(sym, opts = {}) {
   const cvdScore = cvdRes ? scoreCvd(fetchCvdShape(cvdRes), cvdRes.updatedAt) : { score: 0, missing: true };
   const taker = fpRes ? scoreTaker({ bars: fpBars }) : { score: 0, missing: true };
   const oiScore = oiRes ? scoreOi(oiRes, px1hPct) : { score: 0, missing: true };
-  const walls = wallsRes ? wallStats({ model: { walls: wallsRes.walls, events: [], strip: [], depth: wallsRes.depth5, imbalance: wallsRes.imbalance } }, px) : null;
+  const walls = wallsRes ? wallStats(
+    { model: { walls: wallsRes.walls, events: wallsRes.events ?? [], strip: [], depth: wallsRes.depth5, imbalance: wallsRes.imbalance } },
+    px
+  ) : null;
   const depth1 = wallsRes?.depth1 ?? null;
   const depth5 = wallsRes?.depth5 ?? null;
   const whales = ltoRes ? whaleFlow({ groups: ltoRes.groups, minVolUsd: 1e5 }, px) : null;
@@ -2220,6 +2500,10 @@ async function buildBrief(sym, opts = {}) {
       depth5: wallsRes.depth5,
       imbalance: wallsRes.imbalance,
       walls: wallsRes.walls,
+      events: wallsRes.events ?? [],
+      eventCounts: wallsRes.eventCounts ?? null,
+      eventTotal: wallsRes.eventTotal ?? 0,
+      eventWindow: wallsRes.eventWindow ?? null,
       nearestAsk: walls?.nearestAsk ?? null,
       nearestBid: walls?.nearestBid ?? null,
       wallCount: walls?.count ?? 0
@@ -2403,7 +2687,17 @@ var index_default = {
         if (bad) return bad;
         const band = [1, 2, 3, 5].includes(Number(sp.get("band"))) ? Number(sp.get("band")) : 5;
         const snapshots = Math.min(Math.max(Number(sp.get("snapshots")) || 2, 1), 6);
-        const walls = await bookWalls(sym, { band, snapshots, history: sp.get("history") === "1" });
+        const events = sp.get("events") !== "0";
+        const eventSnapshots = Math.min(Math.max(Number(sp.get("back")) || 40, 6), 96);
+        const eventLimit = Math.min(Math.max(Number(sp.get("elimit")) || 12, 1), 40);
+        const walls = await bookWalls(sym, {
+          band,
+          snapshots,
+          history: sp.get("history") === "1",
+          events,
+          eventSnapshots,
+          eventLimit
+        });
         return json(walls);
       }
       if (path === "/api/whales" || path === "/api/lto") {

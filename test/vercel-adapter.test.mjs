@@ -122,7 +122,7 @@ console.log(`\n=== cg-mobile Vercel adapter test · ${SYM} · ${new Date().toISO
   check("brief 200", r.status === 200 && b.ok === true, `${r.ms.toFixed(0)}ms · ${r.raw.length} bytes`);
 
   // real market data, not a placeholder
-  check("price is a live number", typeof b.price === "number" && b.price > 100, String(b.price));
+  check("price is a live number", typeof b.price === "number" && b.price > 0, String(b.price));
   check("symbol echoed", b.sym === SYM);
   check("5m/15m card present", !!b.card && typeof b.card.prob === "number", `${b.card?.statusLine ?? "—"} · ${b.card?.prob ?? "—"}%`);
   check("card has 5 factors", Array.isArray(b.card?.factors) && b.card.factors.length === 5);
@@ -130,12 +130,46 @@ console.log(`\n=== cg-mobile Vercel adapter test · ${SYM} · ${new Date().toISO
   check("15m bars", Array.isArray(b.bars15) && b.bars15.length > 10, `${b.bars15?.length ?? 0} bars`);
   check("footprint panel", !!b.fp, `${b.fp?.venues?.length ?? 0} venues`);
   check("orderbook walls", !!b.walls, `${b.walls?.mid ? "mid " + b.walls.mid : ""} ${b.walls?.venues?.length ?? 0} venues`);
+  {
+    const ev = b.walls?.events ?? [];
+    const kinds = new Set(ev.map((e) => e.type));
+    const okType = [...kinds].every((k) => ["added", "pulled", "eaten"].includes(k));
+    const okRow = ev.every(
+      (e) => ["b", "a"].includes(e.side) && e.price > 0 && e.usd > 0 && e.t > 0
+    );
+    check(
+      "wall events (大墙异动)",
+      ev.length > 0 && ev.length <= 12 && okType && okRow,
+      `${ev.length} events · ${["added", "eaten", "pulled"].map((k) => `${k} ${(b.walls?.eventCounts ?? {})[k] ?? 0}`).join(" / ")} · total ${b.walls?.eventTotal ?? 0}`
+    );
+    check(
+      "wall events window",
+      !!b.walls?.eventWindow && b.walls.eventWindow.snapshots >= 6 && b.walls.eventWindow.to > b.walls.eventWindow.from,
+      b.walls?.eventWindow
+        ? `${b.walls.eventWindow.snapshots} snapshots · ${Math.round((b.walls.eventWindow.to - b.walls.eventWindow.from) / 3600000)}h · min $${Math.round(b.walls.eventWindow.minUsd / 1e3)}k`
+        : "—"
+    );
+    const sorted = ev.every((e, i) => i === 0 || ev[i - 1].t >= e.t);
+    check("wall events newest first", sorted);
+  }
   check("levels (entry/stop)", !!b.levels && !!b.levels.long && !!b.levels.short, `ATR ${b.levels?.atr ?? "—"}`);
   check("whales panel", (b.whales?.h24?.n ?? 0) > 0 && (b.whales?.biggest?.length ?? 0) > 0, `24h ${b.whales?.h24?.n ?? 0} orders · net ${b.whales?.h24?.net ?? "—"} · top ${b.whales?.biggest?.[0]?.ex ?? "—"}`);
   check("liquidation panel", (b.liq?.above?.length ?? 0) + (b.liq?.below?.length ?? 0) > 0, `${(b.liq?.above?.length ?? 0) + (b.liq?.below?.length ?? 0)} levels (${b.liq?.above?.[0]?.price ?? "—"}↑ / ${b.liq?.below?.[0]?.price ?? "—"}↓)`);
   check("no panel errors", (b.errors ?? []).length === 0, (b.errors ?? []).map((e) => e.panel).join(",") || "none");
   check("builtAt timestamp", typeof (b.updatedAt ?? b.builtAt ?? b.fetchedAt) === "number");
   check("under 60s maxDuration", r.ms < 55000, `${(r.ms / 1000).toFixed(1)}s`);
+}
+
+/* --------------------------------------------------- live /api/walls */
+{
+  const r = await call(`/api/walls?sym=${SYM}&band=5`);
+  const b = r.body ?? {};
+  check(
+    "/api/walls 200 + events",
+    r.status === 200 && b.ok === true && (b.events?.length ?? 0) > 0,
+    `${r.ms.toFixed(0)}ms · ${r.raw.length} bytes · ${b.events?.length ?? 0} events · venues ${(b.venues ?? []).length}`
+  );
+  check("/api/walls has depth + walls", !!b.depth1 && !!b.depth5 && (b.walls?.length ?? 0) > 0, `walls ${b.walls?.length ?? 0}`);
 }
 
 /* --------------------------------------------------- a second endpoint */

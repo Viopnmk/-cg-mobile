@@ -52,7 +52,7 @@ export async function buildBrief(sym, opts = {}) {
     settle("footprint", footprint(sym, "m15", fpLim)),
     settle("cvd", fetchCvd(sym, "m15", 150)),
     settle("oi", openInterest(sym)),
-    settle("walls", bookWalls(sym, { band: 5, snapshots: 1, history: false })),
+    settle("walls", bookWalls(sym, { band: 5, snapshots: 1, history: false, events: true, eventSnapshots: 40, eventLimit: 12 })),
     withLiq ? settle("liq", liqLevels(sym, { limit: 240, range: "3d", px: 0 })) : Promise.resolve(null),
     withWhales ? settle("whales", largeOrders(sym, { exchanges: ["Binance"] })) : Promise.resolve(null),
   ]);
@@ -81,7 +81,12 @@ export async function buildBrief(sym, opts = {}) {
   const taker = fpRes ? scoreTaker({ bars: fpBars }) : { score: 0, missing: true };
   const oiScore = oiRes ? scoreOi(oiRes, px1hPct) : { score: 0, missing: true };
 
-  const walls = wallsRes ? wallStats({ model: { walls: wallsRes.walls, events: [], strip: [], depth: wallsRes.depth5, imbalance: wallsRes.imbalance } }, px) : null;
+  const walls = wallsRes
+    ? wallStats(
+        { model: { walls: wallsRes.walls, events: wallsRes.events ?? [], strip: [], depth: wallsRes.depth5, imbalance: wallsRes.imbalance } },
+        px
+      )
+    : null;
   const depth1 = wallsRes?.depth1 ?? null;
   const depth5 = wallsRes?.depth5 ?? null;
   const whales = ltoRes ? whaleFlow({ groups: ltoRes.groups, minVolUsd: 100_000 }, px) : null;
@@ -127,6 +132,10 @@ export async function buildBrief(sym, opts = {}) {
           depth5: wallsRes.depth5,
           imbalance: wallsRes.imbalance,
           walls: wallsRes.walls,
+          events: wallsRes.events ?? [],
+          eventCounts: wallsRes.eventCounts ?? null,
+          eventTotal: wallsRes.eventTotal ?? 0,
+          eventWindow: wallsRes.eventWindow ?? null,
           nearestAsk: walls?.nearestAsk ?? null,
           nearestBid: walls?.nearestBid ?? null,
           wallCount: walls?.count ?? 0,
