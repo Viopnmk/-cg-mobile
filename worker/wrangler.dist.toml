@@ -1,0 +1,4 @@
+name = "cg-mobile-api"
+main = "dist/cg-mobile-api.js"
+compatibility_date = "2024-11-01"
+workers_dev = true

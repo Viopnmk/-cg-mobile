@@ -1,0 +1,10 @@
+name = "cg-mobile-api"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+workers_dev = true
+
+# No bindings, no secrets, no KV needed: the Worker is a pure Coinglass proxy
+# with an isolate-local cache. Free plan friendly.
+
+[observability]
+enabled = true
