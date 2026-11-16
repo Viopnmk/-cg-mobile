@@ -28,7 +28,8 @@ Worker（`worker/`）仍完整保留并已部署，可作实时通道直连（�
 cg-mobile/
 ├── docs/index.html          # 前端（单文件，GitHub Pages 根页；在 *.vercel.app 上自动走实时）
 ├── docs/data/*.json         # GitHub Actions 写的 Coinglass 快照（ETH/BTC/SOL + meta）
-├── api/[route].js           # Vercel Node 函数适配器：/api/* → worker/src 的 Web Request 处理
+├── api/[route].js           # Vercel 入口：/api/* → 适配器（另有 brief/whales/health 显式文件）
+├── adapters/vercel.js       # Node 函数适配器：(req,res) ↔ Web Request/Response，跑 worker/src
 ├── vercel.json              # Vercel 路由：/ → docs/index.html、Functions 60s、/api → health
 ├── package.json             # 只为告诉 Vercel「Node 22 + ESM」，零依赖
 ├── tools/refresh.mjs        # 抓 Coinglass → docs/data（直接 import worker/src 的引擎）
@@ -191,7 +192,7 @@ Vercel 的 **Edge Function** 跑在 Cloudflare 网络上（不能用），但 **
 浏览器  https://<项目>.vercel.app/api/brief?sym=ETH
              │  （*.vercel.app 上页面不再读 data/*.json，而是同源调 /api）
              ▼
-api/[route].js   Node 22 Serverless Function（AWS Lambda）
+api/[route].js   Node 22 Serverless Function（AWS Lambda）→ adapters/vercel.js
    1. origin  + req.query.route + req.url 的 query  →  拼回 /api/brief?sym=ETH
    2. new Request(url, { method, headers })        →  Web Fetch 标准请求
    3. worker.fetch(request, process.env, ctx)      →  worker/src 原封不动地跑
@@ -201,7 +202,9 @@ api/[route].js   Node 22 Serverless Function（AWS Lambda）
 - 为什么文件名是 `api/[route].js` 而不是 `api/[...path].js`：**Vercel 只在 Next.js 里支持 catch-all 路由**，
   普通项目的 `/api` 目录只支持单段动态路由（官方向答里明确说过），写 `[...path].js` 反而会让 `/api/brief` 404。
   Worker 的 12 个路由（含别名）全部是 `/api/` 后的**单段**，所以一个 `[route].js` 就全接了；
-  以后若要加多段路由，再加一个 `api/xxx/[route].js` 即可。
+  以后若要加多段路由，再加一个 `api/xxx/[route].js` 即可。页面真正用的两个接口 `/api/brief`、
+  `/api/whales` 和自检用的 `/api/health` 另存了**显式同名文件**（都是 3 行 re-export），
+  就算哪天 Vercel 对这层动态路由改了行为，页面也不会断。
 - `export const config = { maxDuration: 60 }`：冷缓存时一张全量 brief 要串几跳上游，Hobby 上限 60 秒。
 - `vercel.json` 只做三件事：`/` → `docs/index.html`（根域名直接就是页面）、`/data/*` → `docs/data/*`（留一条静态兵底）、`/api` → `/api/health`。
 - 前端检测：`location.hostname` 命中 `*.vercel.app` 就自动进实时模式（15 秒刷新、右上角亮「Vercel 实时」），

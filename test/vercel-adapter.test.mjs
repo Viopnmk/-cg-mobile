@@ -8,7 +8,9 @@
  *   node test/vercel-adapter.test.mjs BTC
  */
 
-import handler from "../api/[route].js";
+import dynamicHandler from "../api/[route].js";
+import explicitBrief from "../api/brief.js";
+import explicitHealth from "../api/health.js";
 
 const SYM = (process.argv[2] ?? "ETH").toUpperCase();
 const HOST = "cg-mobile-demo.vercel.app";
@@ -26,12 +28,12 @@ function check(name, cond, detail = "") {
 
 /** Minimal IncomingMessage: headers + async-iterable body. */
 class MockReq {
-  constructor(path, { method = "GET", body = null, headers = {} } = {}) {
+  constructor(path, { method = "GET", body = null, headers = {}, routeParam = true } = {}) {
     this.url = path;
     // Vercel fills req.query with the dynamic segment plus the URL's params
     const m = /^\/api(?:\/([^/?#]+))?(?:\?(.*))?$/.exec(path);
     this.query = {};
-    if (m && m[1]) this.query.route = decodeURIComponent(m[1]);
+    if (m && m[1] && routeParam) this.query.route = decodeURIComponent(m[1]);
     for (const [k, v] of new URLSearchParams(m && m[2] ? m[2] : "")) this.query[k] = v;
     this.method = method;
     this.headers = {
@@ -77,11 +79,11 @@ class MockRes {
   }
 }
 
-async function call(path, opts) {
+async function call(path, opts, entry = dynamicHandler) {
   const req = new MockReq(path, opts);
   const res = new MockRes();
   const t0 = performance.now();
-  await handler(req, res);
+  await entry(req, res);
   const ms = performance.now() - t0;
   return { status: res.statusCode, headers: res.headers, body: res.json(), raw: res.body.toString("utf8"), ms };
 }
@@ -140,6 +142,16 @@ console.log(`\n=== cg-mobile Vercel adapter test · ${SYM} · ${new Date().toISO
 {
   const r = await call(`/api/ticker?sym=${SYM}`);
   check("ticker 200", r.status === 200 && r.body?.ok === true, `${r.body?.price}`);
+}
+
+/* ------------------------------- explicit entry files (brief / health) */
+{
+  // these two were matched by a static filename, so Vercel leaves req.query.route
+  // unset: the adapter must recover /api/brief from req.url alone.
+  const b = await call(`/api/brief?sym=${SYM}`, { routeParam: false }, explicitBrief);
+  check("api/brief.js entry (no route param)", b.status === 200 && b.body?.ok === true, `${b.status} · ${b.body?.price}`);
+  const h = await call("/api/health", { routeParam: false }, explicitHealth);
+  check("api/health.js entry", h.status === 200 && h.body?.name === "cg-mobile-api");
 }
 
 /* ------------------------------------------------ host header forwarded */
