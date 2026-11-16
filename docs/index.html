@@ -96,7 +96,8 @@
     background:var(--card); border:1px solid var(--line); color:var(--dim);
     font-size:12.5px; font-weight:700;
   }
-  .chips button.on{background:#1d2430; color:var(--tx); border-color:#33405a;}
+  .chips button.nodata{opacity:.42;}
+  .chips button.on{opacity:1;}background:#1d2430; color:var(--tx); border-color:#33405a;}
 
   /* ---------- cards ---------- */
   main{display:block; padding-top:10px;}
@@ -473,6 +474,7 @@
       const b = document.createElement("button");
       b.textContent = s;
       if (s === state.sym) b.classList.add("on");
+      if (state.available && !state.available.includes(s)) { b.classList.add("nodata"); b.title = "这个标的还没有快照（目前 ETH/BTC/SOL）"; }
       b.addEventListener("click", () => {
         if (state.sym === s) return;
         state.sym = s;
@@ -569,9 +571,13 @@
       el.setupCard.classList.add("hidden");
       el.main.classList.remove("hidden");
     } catch (e) {
-      if (state.brief) {
+      const msg = String(e.message || e);
+      if (state.static && /^没有/.test(msg)) {
+        setLive("err", "无数据");
+        banner("<b>" + sym + "</b> 还没有快照：只抓了 ETH / BTC / SOL。其余标的加上去后就会自动出现。<br>（" + msg + "）", "err");
+      } else if (state.brief) {
         setLive("stale", "沿用旧数据");
-        banner("刷新失败：<b>" + String(e.message || e) + "</b> · 上次成功 " + hhmmss(state.lastOk), "err");
+        banner("刷新失败：<b>" + msg + "</b> · 上次成功 " + hhmmss(state.lastOk), "err");
       } else if (state.static) {
         setLive("err", "无数据");
         banner("读不到 <b>./data/" + sym + ".json</b>：<b>" + String(e.message || e) + "</b><br>这个标的可能还没进 GitHub Actions 的抓取列表（当前 ETH / BTC / SOL），或仓库刚建、Actions 还没跑过第一次。", "err");
@@ -976,6 +982,17 @@
   el.setupCard.classList.add("hidden");
   el.main.classList.remove("hidden");
   loadAll(true);
+  // static mode: which symbols does the snapshot actually cover?
+  if (state.static) {
+    fetch("./" + STATIC_DATA_DIR + "/meta.json?t=" + Date.now())
+      .then((r) => (r.ok ? r.json() : null))
+      .then((m) => {
+        if (!m || !m.symbols) return;
+        state.available = Object.keys(m.symbols).filter((k) => m.symbols[k]?.ok);
+        renderChips();
+      })
+      .catch(() => {});
+  }
 })();
 </script>
 </body>
