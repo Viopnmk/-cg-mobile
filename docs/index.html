@@ -68,7 +68,10 @@
   .chg.up{color:var(--up); background:var(--upbg);}
   .chg.down{color:var(--down); background:var(--downbg);}
   .chg.flat{color:var(--dim); background:var(--card2);}
-  .meta{display:flex; align-items:center; gap:8px; margin-top:6px; font-size:11.5px; color:var(--dim);}
+  .meta{display:flex; align-items:center; gap:8px; margin-top:6px; font-size:11.5px; color:var(--dim); flex-wrap:wrap;}
+  .badge{font-size:10px; font-weight:700; color:#9fd0ff; background:rgba(96,165,250,.12);
+         border:1px solid rgba(96,165,250,.35); border-radius:6px; padding:1.5px 6px; white-space:nowrap;}
+  .badge.live{color:#7ee0c0; background:rgba(46,211,160,.1); border-color:rgba(46,211,160,.35);}
   .refreshbar{display:flex; align-items:center; gap:6px; margin-top:9px;}
   .seg{display:flex; background:var(--card2); border:1px solid var(--line); border-radius:11px; padding:3px; gap:2px;}
   .seg button{
@@ -248,6 +251,7 @@
     <div class="meta">
       <span id="metaTime">等待数据</span>
       <span id="metaTrend" class="hidden">·</span>
+      <span id="srcBadge" class="badge hidden"></span>
     </div>
     <div class="refreshbar">
       <div class="seg" id="seg">
@@ -268,13 +272,14 @@
   <div class="banner" id="banner"></div>
 
   <!-- setup -->
-  <section class="card" id="setupCard">
-    <div class="hd"><h2>连接 Worker</h2><span class="spacer"></span><span class="tag">首次设置</span></div>
+  <section class="card hidden" id="setupCard">
+    <div class="hd"><h2>数据源（可选）</h2><span class="spacer"></span><span class="tag">默认静态</span></div>
     <div class="setup">
-      <label for="workerUrl">Worker 地址（部署后填在这里）</label>
+      <label for="workerUrl">想直连 Worker 就填在这里，留空 = 用 GitHub Pages 上的快照</label>
       <input id="workerUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false"
-             placeholder="https://cg-mobile-api.xxx.workers.dev" />
-      <div class="hint">填你部署的 Cloudflare Worker 根地址，不要带 /api。地址只存在本机浏览器（localStorage）。</div>
+             placeholder="留空，或 https://cg-mobile-api.xxx.workers.dev" />
+      <div class="hint">留空：读本页同目录的 <b>data/&lt;SYM&gt;.json</b>（GitHub Actions 每 5 分钟抓 Coinglass 自动刷新）。
+        填 Worker 根地址（不要带 /api）则直连 Worker 实时接口。地址只存在本机浏览器（localStorage）。</div>
       <button class="go" id="saveUrl">保存并加载</button>
     </div>
   </section>
@@ -378,13 +383,17 @@
     get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch { return d; } },
     set(k, v) { try { localStorage.setItem(k, v); } catch {} },
   };
-  // Pre-filled with the deployed Worker; the setup card on the phone can still
-  // override it (stored in localStorage).
-  const DEFAULT_WORKER = "https://cg-mobile-api.2310566637.workers.dev";
+  // 数据源：
+  //   空 = 静态模式（默认）：读同目录 ./data/<SYM>.json，由 GitHub Actions 每 5 分钟抓
+  //        Coinglass 写到 docs/data/ 下，GitHub Pages 直接托管 —— 和 coinglass 同样的数据。
+  //   或以 https:// 开头 = 直连 Cloudflare Worker 的实时接口（手机设置卡片里可改）。
+  const DEFAULT_WORKER = "";
+  const STATIC_DATA_DIR = "data";
   const state = {
     base: (LS.get("cgm.worker", DEFAULT_WORKER) || "").replace(/\/+$/, ""),
+    get static() { return !this.base; },
     sym: LS.get("cgm.sym", "ETH").toUpperCase(),
-    refreshSec: Number(LS.get("cgm.refresh", "15")) || 15,
+    refreshSec: Number(LS.get("cgm.refresh", DEFAULT_WORKER ? "15" : "60")) || 60,
     kline: LS.get("cgm.kline", "m15"),
     whaleFilter: "all",
     whaleAt: 0,
@@ -413,7 +422,7 @@
     nAsk: $("nAsk"), nAsk2: $("nAsk2"), nBid: $("nBid"), nBid2: $("nBid2"),
     wallList: $("wallList"), whaleMeta: $("whaleMeta"),
     w1n: $("w1n"), w1bs: $("w1bs"), w1net: $("w1net"), wtabs: $("wtabs"), wlist: $("wlist"),
-    foot: $("foot"), cfgBtn: $("cfgBtn"),
+    foot: $("foot"), cfgBtn: $("cfgBtn"), srcBadge: $("srcBadge"),
   };
 
   /* ------------------------------------------------------------- format */
@@ -435,6 +444,19 @@
     return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
   };
   const hhmmss = (ts) => hhmm(ts) + ":" + String(new Date(ts).getSeconds()).padStart(2, "0");
+  /** Beijing wall clock for a data timestamp, whatever the phone's timezone is. */
+  const bj = (ts) => {
+    if (!ts) return "—";
+    const d = new Date(ts + 8 * 3600_000);
+    const p = (n) => String(n).padStart(2, "0");
+    return p(d.getUTCHours()) + ":" + p(d.getUTCMinutes()) + ":" + p(d.getUTCSeconds());
+  };
+  const bjFull = (ts) => {
+    if (!ts) return "—";
+    const d = new Date(ts + 8 * 3600_000);
+    const p = (n) => String(n).padStart(2, "0");
+    return (d.getUTCMonth() + 1) + "-" + p(d.getUTCDate()) + " " + p(d.getUTCHours()) + ":" + p(d.getUTCMinutes());
+  };
   const ago = (ts) => {
     if (!ts) return "";
     const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
@@ -500,24 +522,39 @@
     } finally { clearTimeout(t); }
   }
 
+  /** Static mode: read the JSON GitHub Actions dropped next to this page. */
+  async function fetchStatic(sym, timeoutMs = 15000) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const url = "./" + STATIC_DATA_DIR + "/" + encodeURIComponent(sym) + ".json?t=" + Date.now();
+      const res = await fetch(url, { signal: ctrl.signal, cache: "no-store" });
+      if (!res.ok) throw new Error("没有 " + sym + " 的静态数据（HTTP " + res.status + "）");
+      return await res.json();
+    } finally { clearTimeout(t); }
+  }
+
   /* --------------------------------------------------------------- load */
   async function loadAll(force) {
-    if (!state.base) { el.setupCard.classList.remove("hidden"); el.main.classList.add("hidden"); return; }
     if (state.loading) return;
     state.loading = true;
-    setLive("", "刷新中");
+    setLive("", state.static ? "读取快照" : "刷新中");
     el.refreshBtn.disabled = true;
     const sym = state.sym;
     let brief = null;
     let lite = false;
     try {
-      // full brief first; if the free-plan CPU budget is exceeded, degrade to
-      // the light variant (no liq / whales) instead of showing nothing
-      try {
-        brief = await api("/api/brief?sym=" + encodeURIComponent(sym));
-      } catch (e1) {
-        brief = await api("/api/brief?sym=" + encodeURIComponent(sym) + "&liq=0&whales=0");
-        lite = true;
+      if (state.static) {
+        brief = await fetchStatic(sym);
+      } else {
+        // full brief first; if the free-plan CPU budget is exceeded, degrade to
+        // the light variant (no liq / whales) instead of showing nothing
+        try {
+          brief = await api("/api/brief?sym=" + encodeURIComponent(sym));
+        } catch (e1) {
+          brief = await api("/api/brief?sym=" + encodeURIComponent(sym) + "&liq=0&whales=0");
+          lite = true;
+        }
       }
       if (sym !== state.sym) return;
       if (!brief.ok) throw new Error(brief.error || "brief 失败");
@@ -528,13 +565,16 @@
       if (lite) banner("当前为<b>轻量模式</b>（免费计划 CPU 限制下自动降级：不含清算位/鲸鱼锚点）。");
       else if (errs.length) banner("部分数据暂缺：<b>" + errs.join(" / ") + "</b>（上游限流或超时，已用缓存/其余面板继续）。");
       else banner("");
-      setLive("ok", lite ? "已连接·轻量" : "已连接");
+      setLive("ok", state.static ? "快照" : lite ? "已连接·轻量" : "已连接");
       el.setupCard.classList.add("hidden");
       el.main.classList.remove("hidden");
     } catch (e) {
       if (state.brief) {
         setLive("stale", "沿用旧数据");
         banner("刷新失败：<b>" + String(e.message || e) + "</b> · 上次成功 " + hhmmss(state.lastOk), "err");
+      } else if (state.static) {
+        setLive("err", "无数据");
+        banner("读不到 <b>./data/" + sym + ".json</b>：<b>" + String(e.message || e) + "</b><br>这个标的可能还没进 GitHub Actions 的抓取列表（当前 ETH / BTC / SOL），或仓库刚建、Actions 还没跑过第一次。", "err");
       } else {
         setLive("err", "连接失败");
         banner("无法读取 Worker：<b>" + String(e.message || e) + "</b><br>检查地址是否是 <b>https://…workers.dev</b> 根地址（不要带 /api），以及是否允许跨域（本 Worker 默认允许）。", "err");
@@ -546,7 +586,15 @@
       schedule();
     }
 
-    // whales (own endpoint: 3 venues, heavier) — refresh at most every 60s
+    // whales: the static snapshot ships them inside the symbol JSON (whalesFull);
+    // against a Worker they are their own (heavier) endpoint, max once per 60s
+    if (state.static) {
+      const w = brief && brief.whalesFull;
+      if (w && w.ok) { state.whales = w; state.whaleAt = Date.now(); renderWhales(w); }
+      else if (state.whales) renderWhales(state.whales);
+      else el.wlist.innerHTML = '<div class="empty">这份快照没带鲸鱼挂单（生成时上游超时）。</div>';
+      return;
+    }
     if (state.whales && Date.now() - state.whaleAt < 60000 && !force) {
       renderWhales(state.whales);
       return;
@@ -581,7 +629,17 @@
     const chg = b.chg24hPct;
     el.chg.textContent = pctStr(chg);
     el.chg.className = "chg " + (chg == null ? "flat" : chg > 0 ? "up" : chg < 0 ? "down" : "flat");
-    el.metaTime.textContent = "24h " + pctStr(chg) + " · 数据 " + hhmm(b.fetchedAt);
+    const ts = b.builtAt || b.fetchedAt;
+    if (state.static) {
+      el.metaTime.textContent = "24h " + pctStr(chg) + " · 数据 " + bj(ts) + " 北京时间";
+      el.srcBadge.classList.remove("hidden");
+      el.srcBadge.className = "badge";
+      el.srcBadge.textContent = "GitHub Actions 每5分钟刷新";
+      el.srcBadge.title = "快照生成于 " + bjFull(ts) + "（北京时间）";
+    } else {
+      el.metaTime.textContent = "24h " + pctStr(chg) + " · 数据 " + hhmm(ts);
+      el.srcBadge.classList.add("hidden");
+    }
     if (b.card && b.card.trend) {
       el.metaTrend.classList.remove("hidden");
       el.metaTrend.textContent = "趋势 " + b.card.trend;
@@ -591,7 +649,9 @@
     renderWalls(b);
     drawChart();
     el.foot.textContent =
-      b.sym + "USDT · " + (b.fp?.venues || []).length + " 个足迹场所 · " + (b.walls?.venues || []).length + " 个盘口场所 · 更新 " + hhmmss(b.fetchedAt) +
+      b.sym + "USDT · " + (b.fp?.venues || []).length + " 个足迹场所 · " + (b.walls?.venues || []).length + " 个盘口场所 · 更新 " +
+      (state.static ? bj(ts) + " 北京" : hhmmss(ts)) +
+      (state.static ? " · Coinglass 原始数据（GitHub Actions 快照）" : "") +
       (b.errors && b.errors.length ? " · 缺失 " + b.errors.map((e) => e.panel).join(",") : "");
   }
 
@@ -886,12 +946,15 @@
 
   el.saveUrl.addEventListener("click", () => {
     const v = el.workerUrl.value.trim().replace(/\/+$/, "");
-    if (!/^https:\/\/.+/.test(v) && !/^http:\/\/localhost/.test(v)) {
-      banner("地址要以 <b>https://</b> 开头（本地调试可用 http://localhost:8787）。", "err");
+    if (v && !/^https:\/\/.+/.test(v) && !/^http:\/\/localhost/.test(v)) {
+      banner("地址要以 <b>https://</b> 开头（本地调试可用 http://localhost:8787）；留空则用静态快照。", "err");
       return;
     }
     state.base = v;
     LS.set("cgm.worker", v);
+    state.refreshSec = v ? 15 : 60;
+    LS.set("cgm.refresh", String(state.refreshSec));
+    if (el.seg) el.seg.classList.toggle("hidden", !v);
     banner("");
     resetPanels();
     loadAll(true);
@@ -899,22 +962,20 @@
 
   window.addEventListener("resize", () => { clearTimeout(drawChart._t); drawChart._t = setTimeout(drawChart, 180); });
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && state.base && Date.now() - state.lastOk > 20000) loadAll(true);
+    if (!document.hidden && state.lastOk && Date.now() - state.lastOk > (state.static ? 120000 : 20000)) loadAll(true);
   });
 
   /* --------------------------------------------------------------- boot */
   el.workerUrl.value = state.base || "";
   el.symLabel.textContent = state.sym;
   document.title = "CG 订单流 · " + state.sym;
+  el.seg.classList.toggle("hidden", state.static);
   for (const b of el.seg.children) b.classList.toggle("on", Number(b.dataset.sec) === state.refreshSec);
   for (const b of el.kseg.children) b.classList.toggle("on", b.dataset.k === state.kline);
   renderChips();
-  if (state.base) { loadAll(true); }
-  else {
-    el.setupCard.classList.remove("hidden");
-    el.main.classList.add("hidden");
-    setLive("", "未配置");
-  }
+  el.setupCard.classList.add("hidden");
+  el.main.classList.remove("hidden");
+  loadAll(true);
 })();
 </script>
 </body>

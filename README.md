@@ -1,16 +1,23 @@
-# 📱 cg-mobile — 手机端实时 CG 订单流（Worker 中转版）
+# 📱 cg-mobile — 手机端实时 CG 订单流（GitHub Pages + Actions 快照版）
 
-把 `cg-terminal` 里跑在电脑上的 5m/15m AI 概率与订单流面板，变成**手机上打开就用的网页**：
-一个零依赖的 **Cloudflare Worker** 负责翻墙式转发 + 解密 Coinglass（含 `obe` TOTP 头、AES-ECB 响应解密、inflate、限流退避），
-一个**单文件 iPhone-first 前端**负责展示（暗色、`100dvh`、无横向滚动、随手可点）。
+把 `cg-terminal` 里跑在电脑上的 5m/15m AI 概率与订单流面板，变成**手机上打开就用的网页**。
 
-- Worker 端用**纯 Web API**（`fetch` / `crypto.subtle` / `DecompressionStream`）——Coinglass 的 AES-**ECB** 是 Web Crypto 没有的模式，所以附了一个自带、已与 Node `aes-256-ecb` 逐字节对齐的纯 JS AES 内核（`src/aes.js`），**零 npm 依赖**。
+**数据链路（当前线上形态）**：GitHub Actions 每 5 分钟用 Node 直接跑 `worker/src` 里那套 Coinglass 引擎（`fetch` / `crypto.subtle` / `DecompressionStream` 在 Node 22 里原生可用，同一份代码，零重写）→ 写 `docs/data/{ETH,BTC,SOL}.json` → 提交 → GitHub Pages 直接托管。
+手机上打开 `https://viopnmk.github.io/cg-mobile/` 即见 5 分钟粒度的完整卡片、盘口墙、鲸鱼大单、足迹、5m/15m K 线。
+
+**为什么不用 Worker 实时拉**：见文末「数据源与 Cloudflare 出口」——Coinglass 的 API 主机对 Cloudflare 出口一律 403。
+Worker（`worker/`）仍完整保留并已部署，可作实时通道直连（手机设置卡片里填它的地址即可切换），等哪天 Coinglass 不再封 CF 或中间加一台非 CF 转发就能直接启。
+
+- 引擎用**纯 Web API**（`fetch` / `crypto.subtle` / `DecompressionStream`），同一份代码同时跑在 Cloudflare Workerd 与 Node 22。
+  Coinglass 的 AES-**ECB** 是 Web Crypto 没有的模式，所以附了一个自带、已与 Node `aes-256-ecb` 逐字节对齐的纯 JS AES 内核（`src/aes.js`），**零 npm 依赖**。
 - 卡片算法是 `scripts/eth-5m15m-template.mjs` 的**逐行移植**，并用终端原函数在同一份数据上做了**逐值比对（parity test 全绿）**。
 
-> 状态：**已部署**。前端 → <https://viopnmk.github.io/cg-mobile/>（GitHub Pages，`main` / `docs`）；Worker → <https://cg-mobile-api.2310566637.workers.dev>（账号 `2310566637@qq.com`，workers.dev 子域 `2310566637`，Free 计划，无绑定无 KV）。
+> 状态：**已上线**。
+> - 前端（主线）：<https://viopnmk.github.io/cg-mobile/> —— GitHub Pages 托管 `docs/`，数据由 `.github/workflows/refresh-cg.yml` 每 5 分钟抓 Coinglass 写成 `docs/data/*.json`。
+> - 前端（同一份镜像，Workers 静态资产）：<https://cg-mobile-web.2310566637.workers.dev/>
+> - Worker：<https://cg-mobile-api.2310566637.workers.dev>（账号 `2310566637@qq.com`，workers.dev 子域 `2310566637`，Free 计划，无绑定无 KV）—— 已部署，但上游被封（见下）。
 >
-> ⚠️ **已知线上问题（2026-11-17 实测）**：Cloudflare 边缘抓 `capi.coinglass.com` / `fapi.coinglass.com` / `open-api.coinglass.com` 一律被回源 nginx 挡成 `403 Forbidden`（同一份 header、同一条 URL 在本工作区 AWS 俄勒冈出口是 200），即 Coinglass 封的是 Cloudflare 的出口 ASN（`cf-worker` 头无法被 Worker 覆盖）。因此线上 `/api/brief?sym=ETH` 目前返回 502 `upstream HTTP 403`，`/api/health` 正常。不是 CPU/1102 问题，也不是加密层问题（换 Workers Paid 或换机房都无效）。补数据源的方案见文末「数据源与 Cloudflare 出口」。
-> 边缘顺带实测：OKX 200 可用、Hyperliquid 可达（POST）、Binance 451（美国区限制）、Bybit 403、CoinGecko 429。
+> ⚠️ **Cloudflare 出口被 Coinglass 封禁（2026-11-17 实测）**：边界抓 `capi/fapi/open-api.coinglass.com` 一律回源 nginx `403 Forbidden`（同一份 header、同一条 URL 在本工作区 AWS 俄勒冈出口是 200），封的是 Cloudflare 出口 ASN（`cf-worker` 头无法被 Worker 覆盖，换 Workers Paid 或换机房均无效）。所以 Worker 的 `/api/brief` 现在返回 502 `upstream HTTP 403`，`/api/health` 正常。这就是换成 GitHub Actions 快照的原因。
 
 ---
 
@@ -18,13 +25,17 @@
 
 ```
 cg-mobile/
-├── docs/index.html          # 前端（单文件，直接当 GitHub Pages 根页）
+├── docs/index.html          # 前端（单文件，GitHub Pages 根页）
+├── docs/data/*.json         # GitHub Actions 写的 Coinglass 快照（ETH/BTC/SOL + meta）
+├── tools/refresh.mjs        # 抓 Coinglass → docs/data（直接 import worker/src 的引擎）
+├── .github/workflows/refresh-cg.yml  # 每 5 分钟跑一次 refresh，有变化就 commit
+├── wrangler.site.toml       # 把 docs/ 当 Workers 静态资产托管（Pages 的镜像备份）
 ├── worker/
 │   ├── src/index.js         # 路由 + CORS + 边缘缓存
 │   ├── src/cg-crypto.js     # obe(TOTP) + AES-ECB 解密 + inflate（Web Crypto 版）
 │   ├── src/aes.js           # 纯 JS AES-128/192/256（ECB + PKCS#7）
 │   ├── src/cg-client.js     # TTL 缓存 / in-flight 合并 / 429 冷却 + 陈旧兜底
-│   ├── src/cg-data.js       # kline / orderFlow / bs_usd / OI / 深度墙 / 大单 / 清算位
+│   ├── src/cg-data.js       # kline / orderFlow / OI / 深度墙 / 大单 / 清算位 / whalesPanel
 │   ├── src/cvd.js           # Coinglass CVD 引擎（FlowGrid/recompute/背离/KPI）
 │   ├── src/fp.js            # 足迹聚合（fpFromBuckets / mergeFp）
 │   ├── src/signals.js       # 5 因子打分 / 足迹信号 / 入场-止损-TP / 结论
@@ -38,28 +49,39 @@ cg-mobile/
 
 ---
 
-## 上线三步（还没做，留给你确认）
+## 数据怎么更新（线上主语）
 
-1. **部署 Worker** —— 两条路，手机也能走完：
+```
+GitHub Actions (*/5 * * * *)            GitHub Pages
+        │                             ┌─────────────────────┐
+        │ node tools/refresh.mjs      │ index.html          │
+        │  └─ worker/src/brief.js  ── │ data/ETH.json  ←────┼── commit 回 main
+        │      └─ Coinglass capi      │ data/BTC.json       │
+        │                             │ data/SOL.json       │
+        └── 有变化就 commit+push ────→ └─────────────────────┘
+```
 
-   **A. 手机直接在 Cloudflare 网页版部署（不需要电脑）**
-   - Cloudflare Dashboard → Workers & Pages → Create → Worker → 起个名字（如 `cg-mobile-api`）→ Deploy。
-   - 点 **Edit code**，把 `worker/dist/cg-mobile-api.js`（单文件打包版，82KB）**整段替换**进去 → Deploy。
-   - 拿到形如 `https://cg-mobile-api.<你的子域>.workers.dev` 的地址。
+- 手跑一次：仓库 Actions → `refresh-cg` → Run workflow（或 `gh workflow run refresh-cg.yml`）。
+- 本地手跑：`node tools/refresh.mjs`（默认 `ETH,BTC,SOL`，可 `SYMBOLS=ETH node tools/refresh.mjs`），约 3–4 秒，写完 `docs/data/`。
+- 某个标的抓失败时会**保留上一份好数据**，并在 `meta.json` 里记 `ok:false`，不会把页面刷成白屏。
+- 页面上的“北京时间”直接用快照里的 `builtAt`，跟手机时区无关。
 
-   **B. 有命令行时**
+---
+
+## 上线与运维
+
+1. **Worker（可选，实时通道）**
+
    ```bash
    cd cg-mobile/worker
-   npx wrangler login          # 或 export CLOUDFLARE_API_TOKEN=...
-   npx wrangler deploy         # 读 wrangler.toml（src/index.js）
+   npx wrangler deploy          # 读 wrangler.toml（src/index.js）
+   npm run bundle               # 改了 src 后重打 dist/ 单文件版
    ```
-   改了 `src/` 后要重新打包单文件：`npm run bundle`（= `esbuild src/index.js --bundle --format=esm --target=es2022 --outfile=dist/cg-mobile-api.js`）。
+   手机在页面右上角 ⚙ 里填 Worker 根地址即可切回实时模式（留空 = 用静态快照）。
+   注意：目前 Coinglass 封 Cloudflare 出口，实时模式实际不可用（见文末）。
 
-2. **部署前端**：把 `docs/` 推到任意静态托管（GitHub Pages：仓库 Settings → Pages → 分支 `/docs`）。
-   想免手填地址，可把 `docs/index.html` 顶部的 `const DEFAULT_WORKER = "";` 改成你的 Worker 地址。
-
-3. **手机打开网页** → 首次会弹「连接 Worker」卡片 → 粘贴 Worker 根地址（**不要带 `/api`**）→ 保存并加载。
-   地址只存在手机浏览器 `localStorage`。
+2. **前端 + 数据（主线）**：GitHub Pages → `Deploy from a branch` → `main` / `/docs`。
+   `docs/.nojekyll` 已加，Pages 不走 Jekyll，`data/*.json` 原样发布。
 
 本地预览：先 `cd worker && npx wrangler dev`（默认 `http://127.0.0.1:8787`），再 `python3 -m http.server -d docs 8000` 打开 `http://localhost:8000`。
 
@@ -134,6 +156,8 @@ cg-mobile/
 - **鲸鱼挂单**：卡片里只取 Binance（省请求），`/api/whales` 面板取 3 家；永续/现货用 `type` 区分。
 - **清算位**：只用 Binance 一家的 `liquidationLevels/v2`（limit 240，3 天），不是 4 家合并。
 - **Hyperliquid**：足迹用逐根收盘价平移对齐 Binance，墙/清算不含 HL。
+- **静态快照新鲜度**：主线（GitHub Pages + Actions）每 5 分钟抓一次，卡片上的“数据 HH:MM:SS 北京”就是快照生成时刻；GitHub 的定时任务在高峰时可能延后几分钟，所以实际间隔常在 5–10 分钟。5m/15m 结构不受影响，但**不是 tick 级实时**。
+- **既要实时又要 Coinglass 全保真**：只能中间加一台非 Cloudflare 出口的转发（见文末方案 C）。
 - 全部为行情参考，**不是投资建议**。
 
 ---
@@ -145,5 +169,5 @@ Coinglass 的 API 主机对 Cloudflare 出口做了封禁，Worker 直连必然 
 | 方案 | 数据新鲜度 | Coinglass 保真 | 需要什么 |
 |---|---|---|---|
 | A. 数据层改成 OKX + Hyperliquid | 实时（15s） | 部分丢失（四所聚合足迹/CVD、清算位、聚合墙精度） | 重写 `src/cg-data.js` 一层 |
-| B. GitHub Actions 每 5 分钟抓一次写 `docs/data.json`，Worker 代理该 JSON | 5–10 分钟 | 100%（现有引擎原样跑在 Node 22） | 只需 GitHub（免费公开仓库 Actions） |
-| C. 中间加一台非 Cloudflare 出口的转发（Deno Deploy / Val Town / Render…） | 实时 | 100% | 一个第三方账号（需用户同意） |
+| B. **GitHub Actions 每 5 分钟抓一次写 `docs/data/*.json`，GitHub Pages 直接托管（已上线，主线）** | 5–10 分钟 | 100%（现有引擎原样跑在 Node 22） | 只需 GitHub（免费公开仓库 Actions） |
+| C. 中间加一台非 Cloudflare 出口的转发（Deno Deploy / Val Town / Render…），Worker 恢复实时 | 实时 | 100% | 一个第三方账号（需用户同意） |

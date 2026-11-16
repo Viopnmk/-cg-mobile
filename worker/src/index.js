@@ -30,10 +30,10 @@ import {
   cvd as fetchCvd,
   openInterest,
   bookWalls,
-  largeOrders,
   liqLevels,
   marketFromBars,
   leadKey,
+  whalesPanel,
 } from "./cg-data.js";
 import { cacheStats } from "./cg-client.js";
 
@@ -209,48 +209,7 @@ export default {
       if (path === "/api/whales" || path === "/api/lto") {
         const bad = badSym(sym);
         if (bad) return bad;
-        const min = Math.min(Math.max(Number(sp.get("min")) || 100_000, 10_000), 5_000_000);
-        const [tick, lto] = await Promise.all([kline(sym, "m1", 2, 5_000), largeOrders(sym, { minVolUsd: min })]);
-        const px = tick.length ? tick[tick.length - 1].c : 0;
-        const rows = [];
-        for (const g of lto.groups) {
-          const inst = g.instrument ?? {};
-          for (const o of g.list ?? []) {
-            if (!o || !Number.isFinite(o.price) || !Number.isFinite(o.currentUsd)) continue;
-            if (px && Math.abs(o.price / px - 1) > 0.15) continue;
-            rows.push({
-              ex: inst.exName ?? "?",
-              inst: inst.instrumentId ?? "",
-              kind: inst.type === 10 ? "spot" : "perp",
-              price: o.price,
-              usd: Math.round(o.currentUsd),
-              side: o.side === 2 ? "buy" : "sell",
-              t: o.startTime ?? o.currentTime ?? 0,
-            });
-          }
-        }
-        rows.sort((a, b) => b.usd - a.usd);
-        const now = Date.now();
-        const h1 = rows.filter((r) => r.t >= now - 3600_000);
-        const sum = (arr, f) => arr.reduce((a, r) => a + f(r), 0);
-        return json({
-          ok: true,
-          sym,
-          price: px,
-          minVolUsd: min,
-          rows: rows.slice(0, 80),
-          stats: {
-            total: rows.length,
-            h1: {
-              n: h1.length,
-              buy: Math.round(sum(h1.filter((r) => r.side === "buy"), (r) => r.usd)),
-              sell: Math.round(sum(h1.filter((r) => r.side === "sell"), (r) => r.usd)),
-            },
-            perp: rows.filter((r) => r.kind === "perp").length,
-            spot: rows.filter((r) => r.kind === "spot").length,
-          },
-          updatedAt: now,
-        });
+        return json(await whalesPanel(sym, { minVolUsd: Number(sp.get("min")) || 100_000 }));
       }
 
       if (path === "/api/liq" || path === "/api/liqlevels") {

@@ -1,0 +1,71 @@
+name: refresh-cg
+
+# Keeps https://viopnmk.github.io/cg-mobile/ fed with real Coinglass data.
+#
+# The Cloudflare Worker cannot reach capi.coinglass.com (their API answers 403
+# to Cloudflare egress), but a GitHub runner can — so the snapshot is built here
+# with the exact same engine the Worker uses (worker/src/brief.js) and committed
+# as static JSON under docs/data/, which GitHub Pages serves.
+#
+# Schedule note: GitHub only runs `schedule` on the default branch, and it can
+# lag a few minutes under load; workflow_dispatch runs immediately on demand.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: '要抓的标的，逗号分隔（默认 ETH,BTC,SOL）'
+        required: false
+        default: 'ETH,BTC,SOL'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-cg
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Fetch Coinglass → docs/data
+        env:
+          SYMBOLS: ${{ github.event.inputs.symbols || 'ETH,BTC,SOL' }}
+          REFRESH_CADENCE_MIN: '5'
+        run: node tools/refresh.mjs
+
+      - name: Commit & push if changed
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/data
+          if git diff --cached --quiet; then
+            echo "no changes in docs/data"
+            exit 0
+          fi
+          git commit -m "chore(data): refresh Coinglass snapshot $(date -u +%FT%TZ) [skip ci]"
+          for i in 1 2 3; do
+            if git push; then exit 0; fi
+            echo "push rejected, rebasing and retrying ($i)"
+            git pull --rebase --autostash origin main
+            sleep 3
+          done
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          node -e "const m=require('./docs/data/meta.json');console.log('北京 '+m.beijing+' | '+Object.entries(m.symbols).map(([s,v])=>s+(v.ok?(' '+v.price+' '+v.prob+'%'):' FAILED')).join(' | '))" || true

@@ -421,6 +421,59 @@ export async function largeOrders(sym, { minVolUsd = 100_000, exchanges = ["Bina
   return { groups, ok: groups.length > 0 };
 }
 
+/* ---------------------------------------------------------- whales panel */
+
+/**
+ * The `/api/whales` payload: aggregated large resting orders across venues,
+ * sorted by size and clipped to +-15% of the last price, plus 1h buy/sell flow
+ * stats. Shared by the Worker route and the snapshot script (tools/refresh.mjs)
+ * so both emit exactly the same shape.
+ */
+export async function whalesPanel(sym, { minVolUsd = 100_000 } = {}) {
+  const min = Math.min(Math.max(Number(minVolUsd) || 100_000, 10_000), 5_000_000);
+  const [tick, lto] = await Promise.all([kline(sym, "m1", 2, 5_000), largeOrders(sym, { minVolUsd: min })]);
+  const px = tick.length ? tick[tick.length - 1].c : 0;
+  const rows = [];
+  for (const g of lto.groups) {
+    const inst = g.instrument ?? {};
+    for (const o of g.list ?? []) {
+      if (!o || !Number.isFinite(o.price) || !Number.isFinite(o.currentUsd)) continue;
+      if (px && Math.abs(o.price / px - 1) > 0.15) continue;
+      rows.push({
+        ex: inst.exName ?? "?",
+        inst: inst.instrumentId ?? "",
+        kind: inst.type === 10 ? "spot" : "perp",
+        price: o.price,
+        usd: Math.round(o.currentUsd),
+        side: o.side === 2 ? "buy" : "sell",
+        t: o.startTime ?? o.currentTime ?? 0,
+      });
+    }
+  }
+  rows.sort((a, b) => b.usd - a.usd);
+  const now = Date.now();
+  const h1 = rows.filter((r) => r.t >= now - 3600_000);
+  const sum = (arr, f) => arr.reduce((a, r) => a + f(r), 0);
+  return {
+    ok: true,
+    sym,
+    price: px,
+    minVolUsd: min,
+    rows: rows.slice(0, 80),
+    stats: {
+      total: rows.length,
+      h1: {
+        n: h1.length,
+        buy: Math.round(sum(h1.filter((r) => r.side === "buy"), (r) => r.usd)),
+        sell: Math.round(sum(h1.filter((r) => r.side === "sell"), (r) => r.usd)),
+      },
+      perp: rows.filter((r) => r.kind === "perp").length,
+      spot: rows.filter((r) => r.kind === "spot").length,
+    },
+    updatedAt: now,
+  };
+}
+
 /* ------------------------------------------------------------ liq levels */
 
 /**

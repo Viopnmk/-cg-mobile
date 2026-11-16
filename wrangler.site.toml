@@ -1,0 +1,8 @@
+name = "cg-mobile-web"
+compatibility_date = "2024-11-01"
+workers_dev = true
+
+# Static frontend only: serves docs/ as-is at the Worker root.
+# Deploy: cd cg-mobile && wrangler deploy -c wrangler.site.toml
+[assets]
+directory = "./docs"

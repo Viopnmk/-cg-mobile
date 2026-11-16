@@ -8,6 +8,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "node test/aes.test.mjs && node test/live-test.mjs && node test/parity.test.mjs && node test/frontend-render.test.mjs",
-    "bundle": "esbuild src/index.js --bundle --format=esm --target=es2022 --outfile=dist/cg-mobile-api.js"
+    "bundle": "esbuild src/index.js --bundle --format=esm --target=es2022 --outfile=dist/cg-mobile-api.js",
+    "refresh": "node ../tools/refresh.mjs",
+    "deploy:site": "wrangler deploy -c ../wrangler.site.toml"
   }
 }
