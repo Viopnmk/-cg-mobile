@@ -102,20 +102,35 @@ const win = {
  * `wrangler dev` instead of the in-process module (same page, real HTTP). */
 const BASE = process.env.CGM_BASE || "https://cg-mobile-api.test";
 const overHttp = BASE.startsWith("http://") || BASE.startsWith("https://127");
+
+/* CGM_VERCEL=1 → pretend the page is served from *.vercel.app with an empty
+ * stored worker URL: the page must switch to same-origin /api live mode itself. */
+const HOST = process.env.CGM_VERCEL === "1"
+  ? process.env.CGM_HOST || "cg-mobile-demo.vercel.app"
+  : process.env.CGM_HOST || "cg-mobile.test";
+const VERCEL = /\.vercel\.app$/i.test(HOST);
+
 let fetchCount = 0;
+let lastUrl = "";
 async function fakeFetch(url) {
   fetchCount++;
   const u = String(url);
+  lastUrl = u;
   const p = u.startsWith(BASE) ? u.slice(BASE.length) : u;
   const res = overHttp ? await fetch(BASE + p) : await worker.fetch(new Request(BASE + p), {}, {});
   const text = await res.text();
   return { ok: res.ok, status: res.status, text: async () => text, json: async () => JSON.parse(text) };
 }
 
-const store = new Map([["cgm.worker", BASE], ["cgm.sym", process.argv[2] || "ETH"], ["cgm.refresh", "0"]]);
+const store = new Map([
+  ...(VERCEL ? [] : [["cgm.worker", BASE]]),
+  ["cgm.sym", process.argv[2] || "ETH"],
+  ["cgm.refresh", "0"],
+]);
 const sandbox = {
   document: doc,
   window: win,
+  location: { hostname: HOST, origin: "https://" + HOST, href: "https://" + HOST + "/" },
   localStorage: {
     getItem: (k) => (store.has(k) ? store.get(k) : null),
     setItem: (k, v) => store.set(k, String(v)),
@@ -194,6 +209,14 @@ await wait(6000);
 check("manual refresh re-fetched", fetchCount > before, `${before} → ${fetchCount}`);
 check("price still rendered", /^[\d.,]+$/.test(getEl("price").textContent), getEl("price").textContent);
 check("no error banner", !getEl("banner").classList.contains("show"), getEl("banner").innerHTML.slice(0, 80));
+
+/* same-origin API: on *.vercel.app with no stored address the page must go live */
+if (VERCEL) {
+  check("auto live mode (no address typed)", !getEl("seg").classList.contains("hidden"), "refresh segment visible");
+  check("same-origin /api call", lastUrl.startsWith("/api/"), lastUrl);
+  check("vercel live badge", getEl("srcBadge").textContent === "Vercel 实时", getEl("srcBadge").textContent);
+  check("no setup card nag", getEl("setupCard").classList.contains("hidden"));
+}
 
 console.log(fails ? `\n${fails} FAILURE(S)` : "\nFRONTEND RENDER OK");
 process.exit(fails ? 1 : 0);

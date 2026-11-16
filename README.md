@@ -7,6 +7,7 @@
 
 **为什么不用 Worker 实时拉**：见文末「数据源与 Cloudflare 出口」——Coinglass 的 API 主机对 Cloudflare 出口一律 403。
 Worker（`worker/`）仍完整保留并已部署，可作实时通道直连（手机设置卡片里填它的地址即可切换），等哪天 Coinglass 不再封 CF 或中间加一台非 CF 转发就能直接启。
+**实时那条路现在走 Vercel**：同一份 `worker/src` 套一层 Node 函数适配器（`api/[route].js`），跑在 Vercel 的 AWS Lambda 出口上，Coinglass 不封 —— 见文末「Vercel 实时中转」。
 
 - 引擎用**纯 Web API**（`fetch` / `crypto.subtle` / `DecompressionStream`），同一份代码同时跑在 Cloudflare Workerd 与 Node 22。
   Coinglass 的 AES-**ECB** 是 Web Crypto 没有的模式，所以附了一个自带、已与 Node `aes-256-ecb` 逐字节对齐的纯 JS AES 内核（`src/aes.js`），**零 npm 依赖**。
@@ -25,8 +26,11 @@ Worker（`worker/`）仍完整保留并已部署，可作实时通道直连（�
 
 ```
 cg-mobile/
-├── docs/index.html          # 前端（单文件，GitHub Pages 根页）
+├── docs/index.html          # 前端（单文件，GitHub Pages 根页；在 *.vercel.app 上自动走实时）
 ├── docs/data/*.json         # GitHub Actions 写的 Coinglass 快照（ETH/BTC/SOL + meta）
+├── api/[route].js           # Vercel Node 函数适配器：/api/* → worker/src 的 Web Request 处理
+├── vercel.json              # Vercel 路由：/ → docs/index.html、Functions 60s、/api → health
+├── package.json             # 只为告诉 Vercel「Node 22 + ESM」，零依赖
 ├── tools/refresh.mjs        # 抓 Coinglass → docs/data（直接 import worker/src 的引擎）
 ├── .github/workflows/refresh-cg.yml  # 每 5 分钟跑一次 refresh，有变化就 commit
 ├── wrangler.site.toml       # 把 docs/ 当 Workers 静态资产托管（Pages 的镜像备份）
@@ -43,6 +47,7 @@ cg-mobile/
 │   ├── dist/cg-mobile-api.js # 单文件打包版（手机网页版直接粘贴用）
 │   ├── wrangler.toml        # 无绑定、无 KV，Free 计划可直接跑
 │   └── test/                # aes / 现场实测 / 与终端模板 parity / 前端渲染 / 基准
+├── test/vercel-adapter.test.mjs # 桩 (req,res) 跑真 api/[route].js，打真 Coinglass
 ├── sample-brief-ETH.json   # 一次真实 /api/brief 响应（前端字段参考）
 └── README.md
 ```
@@ -157,7 +162,7 @@ GitHub Actions (*/5 * * * *)            GitHub Pages
 - **清算位**：只用 Binance 一家的 `liquidationLevels/v2`（limit 240，3 天），不是 4 家合并。
 - **Hyperliquid**：足迹用逐根收盘价平移对齐 Binance，墙/清算不含 HL。
 - **静态快照新鲜度**：主线（GitHub Pages + Actions）每 5 分钟抓一次，卡片上的“数据 HH:MM:SS 北京”就是快照生成时刻；GitHub 的定时任务在高峰时可能延后几分钟，所以实际间隔常在 5–10 分钟。5m/15m 结构不受影响，但**不是 tick 级实时**。
-- **既要实时又要 Coinglass 全保真**：只能中间加一台非 Cloudflare 出口的转发（见文末方案 C）。
+- **既要实时又要 Coinglass 全保真**：Cloudflare 出口被封，所以走非 Cloudflare 出口 —— 已落地的是 Vercel Node 函数（AWS Lambda，方案 D）。
 - 全部为行情参考，**不是投资建议**。
 
 ---
@@ -171,3 +176,70 @@ Coinglass 的 API 主机对 Cloudflare 出口做了封禁，Worker 直连必然 
 | A. 数据层改成 OKX + Hyperliquid | 实时（15s） | 部分丢失（四所聚合足迹/CVD、清算位、聚合墙精度） | 重写 `src/cg-data.js` 一层 |
 | B. **GitHub Actions 每 5 分钟抓一次写 `docs/data/*.json`，GitHub Pages 直接托管（已上线，主线）** | 5–10 分钟 | 100%（现有引擎原样跑在 Node 22） | 只需 GitHub（免费公开仓库 Actions） |
 | C. 中间加一台非 Cloudflare 出口的转发（Deno Deploy / Val Town / Render…），Worker 恢复实时 | 实时 | 100% | 一个第三方账号（需用户同意） |
+| D. **Vercel Serverless Function（Node 22 → AWS Lambda 出口）跑同一份 `worker/src`（已加，`api/[route].js`）** | 实时（15s） | 100% | 一个 Vercel 账号（GitHub 登录，Hobby 免费） |
+
+---
+
+## Vercel 实时中转（2026-11-17 新增）
+
+背景：Coinglass 封的是 **Cloudflare 出口**，AWS 不封（本工作区就是 AWS 俄勒冈，实测 200）。
+Vercel 的 **Edge Function** 跑在 Cloudflare 网络上（不能用），但 **Node.js Serverless Function** 跑在 **AWS Lambda** 上 —— 所以同一份 `worker/src` 原样搬过去就能拿回 100% 保真的实时数据，不需要换数据层、不需要重写引擎。
+
+### 它怎么工作
+
+```
+浏览器  https://<项目>.vercel.app/api/brief?sym=ETH
+             │  （*.vercel.app 上页面不再读 data/*.json，而是同源调 /api）
+             ▼
+api/[route].js   Node 22 Serverless Function（AWS Lambda）
+   1. origin  + req.query.route + req.url 的 query  →  拼回 /api/brief?sym=ETH
+   2. new Request(url, { method, headers })        →  Web Fetch 标准请求
+   3. worker.fetch(request, process.env, ctx)      →  worker/src 原封不动地跑
+   4. status / headers（含 CORS）/ body            →  写回 res
+```
+
+- 为什么文件名是 `api/[route].js` 而不是 `api/[...path].js`：**Vercel 只在 Next.js 里支持 catch-all 路由**，
+  普通项目的 `/api` 目录只支持单段动态路由（官方向答里明确说过），写 `[...path].js` 反而会让 `/api/brief` 404。
+  Worker 的 12 个路由（含别名）全部是 `/api/` 后的**单段**，所以一个 `[route].js` 就全接了；
+  以后若要加多段路由，再加一个 `api/xxx/[route].js` 即可。
+- `export const config = { maxDuration: 60 }`：冷缓存时一张全量 brief 要串几跳上游，Hobby 上限 60 秒。
+- `vercel.json` 只做三件事：`/` → `docs/index.html`（根域名直接就是页面）、`/data/*` → `docs/data/*`（留一条静态兵底）、`/api` → `/api/health`。
+- 前端检测：`location.hostname` 命中 `*.vercel.app` 就自动进实时模式（15 秒刷新、右上角亮「Vercel 实时」），
+  不用在设置里填任何地址；同一份页面在 GitHub Pages 上仍然读 5 分钟快照，两边都能用。
+
+### 部署（1 键，无需填任何环境变量/构建参数）
+
+1. 打开 <https://vercel.com/new/import?s=https%3A%2F%2Fgithub.com%2FViopnmk%2Fcg-mobile> （登录用 GitHub 即可）。
+   或在 <https://vercel.com/new> 里选 `Viopnmk/cg-mobile` → Import。
+2. 项目名随意（默认 `cg-mobile`），Framework 选 **Other**，Root Directory 保持 `./`，
+   Build Command / Output Directory / Install Command **全部留空**（零依赖、无构建）。
+3. Deploy。30–60 秒后打开 `https://<项目>.vercel.app/` —— 页面自己就是实时档，无须切换。
+
+部署后自检（任一条能对上就说明通了）：
+
+```bash
+curl -s https://<项目>.vercel.app/api/health            # {"ok":true,...}，带 access-control-allow-origin: *
+curl -s "https://<项目>.vercel.app/api/brief?sym=ETH" | head -c 200   # {"ok":true,"sym":"ETH","price":...}
+curl -s https://<项目>.vercel.app/api/brief?sym=ZZZ    # 400 unsupported symbol
+```
+
+### 本地验证（不部署也能确认）
+
+```bash
+node test/vercel-adapter.test.mjs        # 桩 (req,res) → 真 api/[route].js → 真 Coinglass
+node test/vercel-adapter.test.mjs BTC    # 换标的
+```
+
+2026-11-17 实测结果（ETH，实时行情）：health 200 / OPTIONS 204 / 404 / 400 全部符合；
+`/api/brief` **200，约 16 KB，0.7–0.8 秒**，价格 1822.12、5 因子卡 32%、60 根 5m + 96 根 15m、
+足迹 4 场所、盘口墙 5 场所、鲸鱼 24h 212 笔、清算位上下各 5 档、`errors: []`；CORS `*`、
+`content-type: application/json`、`content-length` 都正确。共 26 项检查全绿。
+前端侧用 DOM 桩跑真页面脚本也验过：`CGM_VERCEL=1 node worker/test/frontend-render.test.mjs`
+→ 自动实时模式、同源 `/api` 调用、“Vercel 实时”徽标、价格/概率/5 因子/墙/鲸鱼/图表全渲染。
+
+### 注意
+
+- 冷启动 0.5–1.5 秒；第一次请求慢一点是正常的，之后同实例内有 8 秒 brief 缓存。
+- 免费 Hobby 额度对个人 15 秒刷一次的用量来说绰绰有余；要更稳（并发/时长）再升 Pro。
+- Vercel 上的仓库根目录会被当静态站发出去（源码本来就是公开仓库），只有 `api/` 变函数，没有密钥。
+- 不想用 Vercel 了：`docs/` 那份 GitHub Pages 页面一行没动，依旧是 5 分钟快照。

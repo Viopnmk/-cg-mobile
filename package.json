@@ -1,0 +1,14 @@
+{
+  "name": "cg-mobile",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Phone-first Coinglass orderflow page: GitHub Pages snapshot, Cloudflare Worker API, and the same API on Vercel (AWS Lambda).",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "test:vercel": "node test/vercel-adapter.test.mjs",
+    "test:worker": "cd worker && node test/aes.test.mjs && node test/live-test.mjs && node test/parity.test.mjs && node test/frontend-render.test.mjs"
+  }
+}

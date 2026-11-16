@@ -274,13 +274,14 @@
 
   <!-- setup -->
   <section class="card hidden" id="setupCard">
-    <div class="hd"><h2>数据源（可选）</h2><span class="spacer"></span><span class="tag">默认静态</span></div>
+    <div class="hd"><h2>数据源（可选）</h2><span class="spacer"></span><span class="tag" id="srcTag">自动</span></div>
     <div class="setup">
-      <label for="workerUrl">想直连 Worker 就填在这里，留空 = 用 GitHub Pages 上的快照</label>
+      <label for="workerUrl">想直连别的接口就填在这里；留空 = 自动（Vercel 同源实时 / GitHub Pages 快照）</label>
       <input id="workerUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false"
              placeholder="留空，或 https://cg-mobile-api.xxx.workers.dev" />
-      <div class="hint">留空：读本页同目录的 <b>data/&lt;SYM&gt;.json</b>（GitHub Actions 每 5 分钟抓 Coinglass 自动刷新）。
-        填 Worker 根地址（不要带 /api）则直连 Worker 实时接口。地址只存在本机浏览器（localStorage）。</div>
+      <div class="hint">留空：在 <b>*.vercel.app</b> 上自动走本部署的 <b>/api</b> 实时接口（15 秒刷新，Vercel Node/AWS Lambda）；
+        在 GitHub Pages 上则读同目录 <b>data/&lt;SYM&gt;.json</b>（Actions 每 5 分钟抓 Coinglass 的快照）。
+        填 Worker 根地址（不要带 /api）则直连 Cloudflare Worker。地址只存在本机浏览器（localStorage）。</div>
       <button class="go" id="saveUrl">保存并加载</button>
     </div>
   </section>
@@ -387,14 +388,20 @@
   // 数据源：
   //   空 = 静态模式（默认）：读同目录 ./data/<SYM>.json，由 GitHub Actions 每 5 分钟抓
   //        Coinglass 写到 docs/data/ 下，GitHub Pages 直接托管 —— 和 coinglass 同样的数据。
-  //   或以 https:// 开头 = 直连 Cloudflare Worker 的实时接口（手机设置卡片里可改）。
+  //   或以 https:// 开头 = 直连 Cloudflare Worker（或任意自建）的实时接口（设置卡片里可改）。
+  //   在 Vercel 上（*.vercel.app）不用填地址：同一个部署自带 /api/*（Node/AWS Lambda
+  //   实时接口），自动进实时模式，15 秒刷新。
   const DEFAULT_WORKER = "";
+  const HOSTNAME = (typeof location !== "undefined" && location.hostname) || "";
+  const SAME_ORIGIN_API = /(^|\.)vercel\.app$/i.test(HOSTNAME);
   const STATIC_DATA_DIR = "data";
   const state = {
     base: (LS.get("cgm.worker", DEFAULT_WORKER) || "").replace(/\/+$/, ""),
-    get static() { return !this.base; },
+    // 静态 = 既没填地址，也不在自带 /api 的 Vercel 部署上
+    get static() { return !this.base && !SAME_ORIGIN_API; },
+    get sameOrigin() { return !this.base && SAME_ORIGIN_API; },
     sym: LS.get("cgm.sym", "ETH").toUpperCase(),
-    refreshSec: Number(LS.get("cgm.refresh", DEFAULT_WORKER ? "15" : "60")) || 60,
+    refreshSec: Number(LS.get("cgm.refresh", DEFAULT_WORKER || SAME_ORIGIN_API ? "15" : "60")) || 60,
     kline: LS.get("cgm.kline", "m15"),
     whaleFilter: "all",
     whaleAt: 0,
@@ -423,7 +430,7 @@
     nAsk: $("nAsk"), nAsk2: $("nAsk2"), nBid: $("nBid"), nBid2: $("nBid2"),
     wallList: $("wallList"), whaleMeta: $("whaleMeta"),
     w1n: $("w1n"), w1bs: $("w1bs"), w1net: $("w1net"), wtabs: $("wtabs"), wlist: $("wlist"),
-    foot: $("foot"), cfgBtn: $("cfgBtn"), srcBadge: $("srcBadge"),
+    foot: $("foot"), cfgBtn: $("cfgBtn"), srcBadge: $("srcBadge"), srcTag: $("srcTag"),
   };
 
   /* ------------------------------------------------------------- format */
@@ -581,6 +588,10 @@
       } else if (state.static) {
         setLive("err", "无数据");
         banner("读不到 <b>./data/" + sym + ".json</b>：<b>" + String(e.message || e) + "</b><br>这个标的可能还没进 GitHub Actions 的抓取列表（当前 ETH / BTC / SOL），或仓库刚建、Actions 还没跑过第一次。", "err");
+      } else if (state.sameOrigin) {
+        setLive("err", "接口失败");
+        banner("本部署的 <b>/api</b> 没有回数据：<b>" + msg + "</b><br>确认 Vercel 项目的 Functions 里能看到 <b>api/[...path].js</b>（仓库根目录要有 package.json），部署日志里没有报错。", "err");
+        el.setupCard.classList.remove("hidden");
       } else {
         setLive("err", "连接失败");
         banner("无法读取 Worker：<b>" + String(e.message || e) + "</b><br>检查地址是否是 <b>https://…workers.dev</b> 根地址（不要带 /api），以及是否允许跨域（本 Worker 默认允许）。", "err");
@@ -644,7 +655,14 @@
       el.srcBadge.title = "快照生成于 " + bjFull(ts) + "（北京时间）";
     } else {
       el.metaTime.textContent = "24h " + pctStr(chg) + " · 数据 " + hhmm(ts);
-      el.srcBadge.classList.add("hidden");
+      if (state.sameOrigin) {
+        el.srcBadge.classList.remove("hidden");
+        el.srcBadge.className = "badge live";
+        el.srcBadge.textContent = "Vercel 实时";
+        el.srcBadge.title = "同源 /api 实时接口（Vercel · Node/AWS Lambda），每 " + state.refreshSec + " 秒刷新";
+      } else {
+        el.srcBadge.classList.add("hidden");
+      }
     }
     if (b.card && b.card.trend) {
       el.metaTrend.classList.remove("hidden");
@@ -958,7 +976,7 @@
     }
     state.base = v;
     LS.set("cgm.worker", v);
-    state.refreshSec = v ? 15 : 60;
+    state.refreshSec = v || SAME_ORIGIN_API ? 15 : 60;
     LS.set("cgm.refresh", String(state.refreshSec));
     if (el.seg) el.seg.classList.toggle("hidden", !v);
     banner("");
@@ -973,6 +991,7 @@
 
   /* --------------------------------------------------------------- boot */
   el.workerUrl.value = state.base || "";
+  if (el.srcTag) el.srcTag.textContent = state.sameOrigin ? "Vercel 实时" : state.base ? "自定义接口" : "静态快照";
   el.symLabel.textContent = state.sym;
   document.title = "CG 订单流 · " + state.sym;
   el.seg.classList.toggle("hidden", state.static);
