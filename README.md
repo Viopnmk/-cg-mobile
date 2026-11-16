@@ -214,6 +214,9 @@ api/[route].js   Node 22 Serverless Function（AWS Lambda）
 2. 项目名随意（默认 `cg-mobile`），Framework 选 **Other**，Root Directory 保持 `./`，
    Build Command / Output Directory / Install Command **全部留空**（零依赖、无构建）。
 3. Deploy。30–60 秒后打开 `https://<项目>.vercel.app/` —— 页面自己就是实时档，无须切换。
+   （万一根域名打开是 404（rewrite 没生效），用 `https://<项目>.vercel.app/docs/` 打开，是同一份页面，同样自动实时。）
+
+> 没登录过 Vercel 会先跳注册页：点 **Continue with GitHub** → 授权 → 自动接回 Import 流程（仓库已是 public，不用额外授权范围）。
 
 部署后自检（任一条能对上就说明通了）：
 
