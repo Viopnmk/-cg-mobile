@@ -1,7 +1,7 @@
 {
-  "updatedAt": "2026-11-16T17:50:17.930Z",
-  "updatedAtMs": 1794851417930,
-  "beijing": "2026-11-17 01:50:17",
+  "updatedAt": "2026-11-16T17:57:21.006Z",
+  "updatedAtMs": 1794851841006,
+  "beijing": "2026-11-17 01:57:21",
   "cadenceMin": 5,
   "cadenceLabel": "GitHub Actions 自动刷新（每 5 分钟）",
   "source": "coinglass",
@@ -9,32 +9,32 @@
   "symbols": {
     "ETH": {
       "ok": true,
-      "price": 1824.01,
-      "prob": 33,
+      "price": 1821.89,
+      "prob": 19,
       "status": "wait",
-      "buildMs": 1001,
+      "buildMs": 1499,
       "errors": [],
-      "beijing": "2026-11-17 01:50:13"
+      "beijing": "2026-11-17 01:57:16"
     },
     "BTC": {
       "ok": true,
-      "price": 64924,
+      "price": 64923.3,
       "prob": 54,
       "status": "wait",
-      "buildMs": 630,
+      "buildMs": 693,
       "errors": [],
-      "beijing": "2026-11-17 01:50:15"
+      "beijing": "2026-11-17 01:57:18"
     },
     "SOL": {
       "ok": true,
-      "price": 71.31,
+      "price": 71.3,
       "prob": 8,
       "status": "wait",
-      "buildMs": 666,
+      "buildMs": 718,
       "errors": [
         "walls"
       ],
-      "beijing": "2026-11-17 01:50:16"
+      "beijing": "2026-11-17 01:57:19"
     }
   }
 }
